@@ -2,7 +2,7 @@
 <project version="4">
   <component name="ProjectModuleManager">
     <modules>
-      <module fileurl="file://$PROJECT_DIR$/.idea/NetworkWorker.iml" filepath="$PROJECT_DIR$/.idea/NetworkWorker.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/raging-socket.iml" filepath="$PROJECT_DIR$/.idea/raging-socket.iml" />
     </modules>
   </component>
 </project>

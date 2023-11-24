@@ -1,0 +1,35 @@
+const SocketMessage = {};
+
+let connectionMessageNumber = 0;
+SocketMessage.S2C_CLAIM_STATUS = ""+connectionMessageNumber++;
+SocketMessage.C2S_STATUS_REPORT = ""+connectionMessageNumber++;
+SocketMessage.S2C_REQUEST_TASKS = ""+connectionMessageNumber++;
+SocketMessage.C2S_CONFIRM_TASKS = ""+connectionMessageNumber++;
+SocketMessage.C2S_REPORT_TASKS_STATUS = ""+connectionMessageNumber++;
+SocketMessage.C2S_UNACCEPTABLE_TASK = ""+connectionMessageNumber++;
+SocketMessage.C2S_REQUEST_SOURCECODE = ""+connectionMessageNumber++;
+SocketMessage.S2C_RESPONSE_SOURCECODE = ""+connectionMessageNumber++;
+SocketMessage.C2S_REQUEST_PACKAGE_BUFFER_FROM_PACKAGE_HASH = ""+connectionMessageNumber++;
+SocketMessage.S2C_RESPONSE_PACKAGE_BUFFER = ""+connectionMessageNumber++;
+SocketMessage.S2C_REQUEST_PACKAGES_FROM_PACKAGE_HASH = ""+connectionMessageNumber++;
+SocketMessage.C2S_RESPONSE_PACKAGES_FROM_PACKAGE_HASH = ""+connectionMessageNumber++;
+SocketMessage.S2C_SEND_WORKER_DATA = ""+connectionMessageNumber++;
+SocketMessage.S2C_TASK_SUPPLEMENTATION = ""+connectionMessageNumber++;
+SocketMessage.C2S_TASK_STARTED = ""+connectionMessageNumber++;
+SocketMessage.C2S_TASK_PROCESSING = ""+connectionMessageNumber++;
+SocketMessage.C2S_TASK_ERROR = ""+connectionMessageNumber++;
+SocketMessage.C2S_TASK_COMPLETE = ""+connectionMessageNumber++;
+SocketMessage.S2C_RECEIVE_RESULT = ""+connectionMessageNumber++;
+SocketMessage.S2C_TASK_CANCEL = ""+connectionMessageNumber++;
+SocketMessage.C2S_WORKER_READY = ""+connectionMessageNumber++;
+SocketMessage.S2C_SEND_TRANSFER_DATA_NAME = ""+connectionMessageNumber++;
+SocketMessage.C2S_RECEIVED_TRANSFER_DATA_NAME = ""+connectionMessageNumber++;
+SocketMessage.S2C_SEND_TRANSFER_DATA = ""+connectionMessageNumber++;
+SocketMessage.C2S_RECEIVED_TRANSFER_DATA = ""+connectionMessageNumber++;
+SocketMessage.S2C_SEND_VARS = ""+connectionMessageNumber++;
+SocketMessage.C2S_RECEIVED_VARS = ""+connectionMessageNumber++;
+SocketMessage.S2C_TASK_START = ""+connectionMessageNumber++;
+SocketMessage.CPU_LIMIT = ""+connectionMessageNumber++;
+SocketMessage.CLIENT_STATUS_REPORT = ""+connectionMessageNumber++;
+
+module.exports = SocketMessage;

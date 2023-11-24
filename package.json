@@ -1,18 +1,22 @@
 {
-  "name": "networkworker",
+  "name": "raging-socket",
   "version": "1.0.0",
   "description": "",
-  "main": "index.js",
+  "main": "src/RagingSocket.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "author": "",
   "license": "ISC",
   "devDependencies": {
+    "archiver": "^6.0.0",
+    "fs-extra": "^11.1.1",
     "ip-to-int": "^0.3.1",
+    "kdjn-worker-manager": "0.0.1",
+    "pathurizer": "0.0.1",
     "socket.io": "^4.7.2",
     "socket.io-client": "^4.7.2",
     "systeminformation": "^5.18.15",
-    "worker-manager": "file:../WorkerManager"
+    "tar": "^6.1.15"
   }
 }
