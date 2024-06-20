@@ -16,6 +16,9 @@ class _WorkerBase extends EventEmitter
 
 		this.name = "";
 	}
+
+	/** @return {boolean} */
+	get _log() { return false; }
 }
 
 module.exports = _WorkerBase;

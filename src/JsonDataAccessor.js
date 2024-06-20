@@ -15,7 +15,7 @@ class JsonDataAccessor
 		this.name = parsed.toFileNameIgnoreExtension;
 		if(parsed.extension !== "json") parsed.extension = "json";
 		this.path = parsed.url;
-		console.log("this.path", this.path);
+
 		/** @type {Object.<string>} */
 		this.data = null;
 
@@ -24,12 +24,32 @@ class JsonDataAccessor
 		{
 			fs.readFile(this.path, "utf-8", (error, data)=>
 			{
-				if(error) throw error;
-				this.data = getJsonProxy(JsonParse(data), this.path, setterCallback);
-				resolve(this.data);
+				if(error)
+				{
+					fs.writeFile(this.path, "{}", "utf-8", (error)=>
+					{
+						initializeComplete(this, resolve, error, "{}", setterCallback);
+					});
+				}
+				initializeComplete(this, resolve, null, data, setterCallback);
 			});
 		});
 	}
+}
+
+/**
+ *
+ * @param {JsonDataAccessor} accessor
+ * @param resolve
+ * @param {Error} error
+ * @param {string} data
+ * @param {function(property:string, value:any):void} setterCallback
+ */
+const initializeComplete = (accessor, resolve, error, data, setterCallback)=>
+{
+	if(error) throw error;
+	accessor.data = getJsonProxy(JsonParse(data), accessor.path, setterCallback);
+	resolve(accessor.data);
 }
 
 /**
@@ -39,10 +59,14 @@ class JsonDataAccessor
  */
 const JsonParse = (data)=>
 {
-	try {
-		return JSON.parse(data);
-	} catch (error) {
-		return {};
+	if(!data) return {};
+	else
+	{
+		try {
+			return JSON.parse(data);
+		} catch (error) {
+			return {};
+		}
 	}
 }
 

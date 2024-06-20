@@ -1,7 +1,13 @@
-const RequestTask = require("./RequestTask");
-const ToClientSocket = require("./ToClientSocket");
+/** @type {typeof RequestTask} */
+let RequestTask;
+
+/** @type {typeof ToClientSocket} */
+let ToClientSocket;
+
 const SocketMessage = require("./SocketMessage");
-const RagingSocket = require("./RagingSocket");
+
+/** @type {typeof RagingSocket} */
+let RagingSocket;
 
 /** @type {PackageManager} */
 let packageManager;
@@ -12,21 +18,24 @@ class ServerWork
 {
 	static initialize()
 	{
+		ToClientSocket = require("./ToClientSocket")
+		RequestTask = require("./RequestTask");
+		RagingSocket = require("./RagingSocket");
 		packageManager = RagingSocket.manager;
 	}
 
 	/**
 	 *
-	 * @param {string} sourcecode
 	 * @param {object} workerData
 	 * @param {string} processType
 	 * @return {Promise<{status:TaskStatus, error:Error, result:any, vars:any}|any>}
+	 * @return {Promise<ToClientResponse>}
 	 */
-	static assign(sourcecode, workerData, processType)
+	static assign(workerData, processType)
 	{
-		return new Promise(resolve =>
+		return new Promise((resolve, reject) =>
 		{
-			RequestTask.queue(sourcecode, workerData, resolve, processType);
+			RequestTask.queue(workerData, resolve, reject, processType);
 
 			if(!isAssigning)
 			{
@@ -107,7 +116,7 @@ const assign = ()=>
 						clientStatus.delegateTask(task);
 					}
 					taskDelegatedClients[address] = toClientSocket;
-					if(clientStatus.idleCpuLength <= 0) delete cpuWorkableClients[address];
+					if(clientStatus.idleGpuLength <= 0) delete gpuWorkableClients[address];
 					if(!tasks.length) break;
 				}
 
@@ -180,7 +189,7 @@ const assign = ()=>
 	for(const address in taskDelegatedClients)
 	{
 		const toClient = taskDelegatedClients[address];
-		const requests = toClient.requests;
+		const requests = toClient.requests.concat();
 		const length = requests.length;
 		for(let i=0; i<length; i++)
 		{
@@ -201,11 +210,16 @@ const assign = ()=>
 			const outbounds = [];
 			for(let i=0; i<length; i++)
 			{
-				outbounds.push(toClient.requests[i].reserve());
+				outbounds.push(requests[i].reserve());
 			}
-			toClient.socket.emit(SocketMessage.S2C_REQUEST_TASKS, outbounds);
+			toClient.emit(SocketMessage.S2C_REQUEST_TASKS, outbounds);
 		});
 		toClient.requests.length = 0;
+	}
+
+	if(Object.keys(cpuTaskQueues).length || Object.keys(gpuTaskQueues).length)
+	{
+		ToClientSocket.claimStatus();
 	}
 
 	isAssigning = false;

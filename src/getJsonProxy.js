@@ -4,10 +4,10 @@ const fs = require("fs");
  *
  * @param {object} target
  * @param {string} jsonFilePath
- * @param {function(property:string, value:any):void} [setterCallback=null]
+ * @param {function(key:string, value:any):void} [onKeySet=null]
  * @return {object}
  */
-module.exports = (target, jsonFilePath, setterCallback=null)=>
+module.exports = (target, jsonFilePath, onKeySet=null)=>
 {
 	let isQueueSave = false;
 	let isSaving = false;
@@ -34,12 +34,15 @@ module.exports = (target, jsonFilePath, setterCallback=null)=>
 		if(target[property] !== value)
 		{
 			target[property] = value;
-			if(setterCallback) setterCallback(property, value);
+			if(onKeySet) onKeySet(property, value);
 
 			if(!isSaving) save();
 			else isQueueSave = true;
 		}
+		return true;
 	}
 
-	return new Proxy(target, handler);
+	const proxy = new Proxy(target, handler);
+	save();
+	return proxy;
 }

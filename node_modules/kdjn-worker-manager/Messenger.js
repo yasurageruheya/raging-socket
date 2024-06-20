@@ -1,4 +1,3 @@
-
 class Messenger
 {
 	/**
@@ -82,8 +81,23 @@ class Messenger
 				});
 			}
 		}
-		if(transferable) this.workerBase.port.postMessage(data, [data]);
+		if(transferable)
+		{
+			if(typeof data.buffer !== "undefined" && data.buffer instanceof ArrayBuffer) data = data.buffer;
+			try {
+				this.workerBase.port.postMessage(data, [data]);
+			} catch (error) {
+				this.workerBase.port.postMessage(data);
+			}
+		}
 		else this.workerBase.port.postMessage(data);
+
+		if(this.workerBase._log)
+		{
+			const who = this.workerBase.constructor.name;
+			const id = this.workerBase.name;
+			console.log(who + ":" + id + " >> ", data);
+		}
 	}
 }
 

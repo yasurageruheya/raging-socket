@@ -7,7 +7,6 @@ const jsPathCache = {};
 /** @type {string[]} */
 const queue = [];
 
-const WorkerMain = require("./WorkerMain");
 const {EventEmitter} = require("events");
 
 const presenter = new EventEmitter();
@@ -15,6 +14,11 @@ const presenter = new EventEmitter();
 class WorkerManager
 {
 	static workerLimit = require("os").cpus().length;
+
+	static get require() { return require; }
+
+	/** @return {boolean} */
+	static logOutput = false;
 
 	/**
 	 *
@@ -45,6 +49,7 @@ class WorkerManager
 
 		const sendSubWorkerData = Object.assign({}, workerData);
 		sendSubWorkerData.jsPath = jsPath;
+		sendSubWorkerData.___log = WorkerManager.logOutput;
 
 		return new Promise(resolve =>
 		{
@@ -123,3 +128,5 @@ const initializeWorker = (resolve, workerMain)=>
 }
 
 module.exports = WorkerManager;
+
+const WorkerMain = require("./WorkerMain");

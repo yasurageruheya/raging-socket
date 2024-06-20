@@ -7,16 +7,31 @@ const ClientStatus = require("./ClientStatus");
 const {performance} = require("perf_hooks");
 const {EventEmitter} = require("events");
 const {Server} = require("socket.io");
+
+/** @type {typeof PackageManager} */
 const PackageManager = require("./PackageManager");
+
+/** @type {typeof RequestTask} */
 const RequestTask = require("./RequestTask");
+
+/** @type {typeof ClientWork} */
 const ClientWork = require("./ClientWork");
+
+/** @type {typeof ServerWork} */
 const ServerWork = require("./ServerWork");
 
+/** @type {typeof ToServerSocket} */
 const ToServerSocket = require("./ToServerSocket");
+
+/** @type {typeof ToClientSocket} */
 const ToClientSocket= require("./ToClientSocket");
 
-const WorkerManager = require("kdjn-worker-manager");
+/** @type {typeof WorkerManager} */
+let WorkerManager;
+const {Writable} = require("stream");
+const zlib = require("zlib");
 
+/** @type {Server} */
 const serverSocket = new Server();
 
 const _root = path.join(__dirname, "../");
@@ -31,6 +46,11 @@ const sourcecodeFromHashDirectoryRead = new Promise(resolve =>
 	});
 });
 
+let isInitialized = false;
+
+const emitter = new EventEmitter();
+emitter.setMaxListeners(100);
+
 
 /** @type {Object.<null>} */
 const targets = {};
@@ -40,7 +60,7 @@ myStatus.cpuLength = os.cpus().length;
 /** @type {PackageManager} */
 let manager;
 
-class RagingSocket extends EventEmitter
+class RagingSocket
 {
 	/** @return {ClientStatus} */
 	static get myStatus() { return myStatus; }
@@ -54,6 +74,8 @@ class RagingSocket extends EventEmitter
 	static get manager() { return manager; }
 
 	get manager() { return manager; }
+
+	static options = require("./RagingSocketOptions");
 
 	/**
 	 *
@@ -126,62 +148,134 @@ class RagingSocket extends EventEmitter
 	}
 
 	/**
+	 * @typedef WorkerData
+	 * @property {string} jsPath
+	 */
+
+	/**
 	 *
 	 * @param {string} sourcecode
-	 * @param {object} workerData
 	 * @param {"cpu"|"gpu"} processType
-	 * @return {Promise<{status: TaskStatus, error: Error, result: *, vars: *}|*>}
+	 * @param {object} [workerData=null]
+	 * @return {Promise<ToClientResponse>}
 	 */
-	static assign(sourcecode, workerData, processType)
+	// static assign(sourcecode, processType, workerData=null)
+	/**
+	 *
+	 * @param {WorkerData} workerData
+	 * @param {"cpu"|"gpu"|"both"} processType
+	 * @return {Promise<ToClientResponse>}
+	 */
+	static assign(workerData, processType)
 	{
-		return ServerWork.assign(sourcecode, workerData, processType.toLowerCase());
+		if(!isInitialized)
+		{
+			if (!WorkerManager)
+			{
+				try {
+					initialize();
+				} catch (error) {
+					throw new Error("RagingSocket.initialize メソッドが呼び出される前に RagingSocket.assign が呼び出されました。先に RagingSocket.initialize(WorkerManager) を呼び出し、WorkerManager クラスを RagingSocket へ渡してください。");
+				}
+			}
+			return new Promise(resolve =>
+			{
+				emitter.on("initialized", () =>
+				{
+					resolve(ServerWork.assign(workerData, processType.toLowerCase()));
+				});
+			});
+		}
+		else
+		{
+			return ServerWork.assign(workerData, processType.toLowerCase());
+		}
 	}
 
-	static initialize()
+	static initialize(WorkerManagerClass)
 	{
-		if(!manager) manager = new PackageManager();
+		initialize(WorkerManagerClass);
+	}
+
+	constructor()
+	{
+
+	}
+}
+
+const initialize = (WorkerManagerClass)=>
+{
+	if(!manager)
+	{
+		if(WorkerManagerClass) WorkerManager = WorkerManagerClass;
+		else
+		{
+			try {
+				WorkerManager = require("kdjn-worker-manager");
+			} catch (error) {
+				throw new Error("RagingSocket.initialize() メソッドの引数に kdjn-worker-manager モジュールの WorkerManager クラスが渡されていますか？ RagingSocket を利用するには npm install kdjn-worker-manager でモジュールをインストールしておく必要があります");
+			}
+		}
+		serverSocket.listen(require("./RagingSocketOptions").socketPort);
+		manager = new PackageManager();
 		ToServerSocket.initialize();
 		ToClientSocket.initialize();
 		ServerWork.initialize();
 		RequestTask.initialize();
 
-		return getGraphicsInfo.then(data=>
+		const promises = [];
+		promises.push(new Promise(resolve =>
 		{
-			for(let i=0; i<data.controllers.length; i++)
+			getGraphicsInfo.then(data=>
 			{
-				const model = data.controllers[i].model.toLowerCase();
-				if(model.includes("geforce") || model.includes("radeon"))
+				for(let i=0; i<data.controllers.length; i++)
 				{
-					myStatus.gpuLength++;
+					const model = data.controllers[i].model.toLowerCase();
+					if(model.includes("geforce") || model.includes("radeon"))
+					{
+						myStatus.gpuLength++;
+					}
 				}
-			}
-			return sourcecodeFromHashDirectoryRead;
+				resolve();
+			});
+		}))
 
-		}).then(hashes=>
+		promises.push(new Promise(resolve =>
 		{
-			const length = hashes.length;
-			for(let i=0; i<length; i++)
+			sourcecodeFromHashDirectoryRead.then(hashes =>
 			{
-				myStatus.sourcecodes[hashes[i]] = 1;
-			}
-			return manager.initialize();
-		}).then(()=>
-		{
-			serverSocket.on("connection",
-				/** @param {Socket} clientSocket */
-				(clientSocket)=>
+				const length = hashes.length;
+				for(let i=0; i<length; i++)
 				{
-					ToClientSocket.setupClient(clientSocket);
+					myStatus.sourcecodes[hashes[i]] = 1;
 				}
-			);
+				resolve();
+			})
+		}));
 
-			searchPartner();
-		});
-	}
+		promises.push(new Promise(resolve =>
+		{
+			manager.initialize().then(()=>
+			{
+				console.log("searchPartner");
+				serverSocket.on("connection",
+					/** @param {Socket} clientSocket */
+					(clientSocket)=>
+					{
+						ToClientSocket.setupClient(clientSocket);
+					}
+				);
 
-	constructor()
-	{
-		super();
+				searchPartner();
+				resolve();
+			})
+		}));
+
+		Promise.all(promises).then(()=>
+		{
+			isInitialized = true;
+			emitter.emit("initialized");
+		})
 	}
 }
 
@@ -206,105 +300,177 @@ setTimeout(()=>
 	console.log("end!!!!");
 }, 1000 * 60 * 60 * 24);
 
-const archiver = require("archiver");
-const archiveOptions = {};
-archiveOptions.gzip = true;
-archiveOptions.gzipOptions = {};
-archiveOptions.gzipOptions.memLevel = 9;
-archiveOptions.gzipOptions.strategy = 3;
-archiveOptions.gzipOptions.windowBits = 15;
-archiveOptions.statConcurrency = 1;
-const {Writable} = require("stream");
-
-class CustomWriteStream extends Writable
+if(0)
 {
-	constructor() {
-		super();
-		this.buffers = [];
-	}
-	_write(chunk, encoding, callback) {
-		this.buffers.push(chunk);
-		callback();
-	}
-}
+	const archiveOptions = {};
+	archiveOptions.gzip = true;
+	archiveOptions.gzipOptions = {};
+	archiveOptions.gzipOptions.memLevel = 9;
+	archiveOptions.gzipOptions.strategy = 3;
+	archiveOptions.gzipOptions.windowBits = 15;
+	archiveOptions.statConcurrency = 1;
+	const {Writable} = require("stream");
 
-const node_modules = path.join(_root, "node_modules");
-const tar = require("tar");
-const zlib = require("zlib");
-
-const fsEx = require("fs-extra");
-const scopedPackageVersions = {};
-
-const now = performance.now();
-
-// const packageDirs = fs.readdirSync(path.join(_root, "node_modules"));
-const packages = fs.readFileSync(path.join(_root, "package-lock.json"), "utf-8");
-const dependencies = JSON.parse(packages).dependencies;
-const packageNames = Object.keys(dependencies);
-let i = packageNames.length;
-while (i--)
-{
-	if(packageNames[i].includes("@types/")) packageNames.splice(i, 1);
-	else
+	class CustomWriteStream extends Writable
 	{
-		// let slash = packageNames[i].lastIndexOf("/");
-		// while (slash >= 0)
-		// {
-		// 	packageNames[i] = packageNames[i].slice(0, slash);
-		// 	slash = packageNames[i].lastIndexOf("/");
-		// }
-
-		if(packageNames[i].charAt(0) === "@")
-		{
-			const replaced = packageNames[i].replace("@", "_AT_");
-			// if(!fs.existsSync(path.join(node_modules, replaced)))
-				fsEx.copySync(path.join(node_modules, packageNames[i]), path.join(_root, "node_modules", replaced));
-			// else
-			// {
-			// 	const _scopedPackageVersions = {};
-			// 	const scopedPackageDir = path.join(node_modules, packageNames[i]);
-			// 	const directories = fs.readdirSync(scopedPackageDir);
-			// 	for(const dir in directories)
-			// 	{
-			// 		const packageJsonBuffer = fs.readFileSync(path.join(scopedPackageDir, dir, "package.json"));
-			// 		const packageJson = JSON.parse(packageJsonBuffer)
-			// 	}
-			// }
-			packageNames[i] = replaced;
-			// packageNames[i] = "@" + packageNames[i];
+		constructor() {
+			super();
+			this.buffers = [];
+		}
+		_write(chunk, encoding, callback) {
+			this.buffers.push(chunk);
+			callback();
 		}
 	}
 
-	// if(packageNames[i].charAt(0) === "@") packageNames.splice(i, 1);
+	const node_modules = path.join(process.cwd(), "node_modules");
+	const tar = require("tar");
+	const zlib = require("zlib");
+
+	const fsEx = require("fs-extra");
+	const scopedPackageVersions = {};
+
+	const now = performance.now();
+
+// const packageDirs = fs.readdirSync(path.join(_root, "node_modules"));
+	const packageLockJsonText = fs.readFileSync(path.join(process.cwd(), "package-lock.json"), "utf-8");
+	const packageLockJsonObj = JSON.parse(packageLockJsonText);
+	if(typeof packageLockJsonObj.dependencies !== "undefined")
+	{
+		const packageNames = Object.keys(packageLockJsonObj);
+		let i = packageNames.length;
+		while (i--)
+		{
+			if(packageNames[i].includes("@types/")) packageNames.splice(i, 1);
+			else
+			{
+				if(packageNames[i].charAt(0) === "@")
+				{
+					const replaced = packageNames[i].replace("@", "_AT_");
+					fsEx.copySync(path.join(node_modules, packageNames[i]), path.join(node_modules, replaced));
+
+					packageNames[i] = replaced;
+				}
+				else if(packageNames[i] === "fsevents")
+				{
+					packageNames.splice(i, 1);
+				}
+			}
+
+			// if(packageNames[i].charAt(0) === "@") packageNames.splice(i, 1);
+		}
+	}
+	else if(packageLockJsonObj.packages)
+	{
+
+	}
+
+
+//  const modulesToArchive = ["socket.io", "socket.io-client"];
+	const modulesToArchive = packageNames;
+	const archiveOptions2 = {};
+	archiveOptions2.cwd = path.join(process.cwd(), "node_modules");
+	archiveOptions2.sync = true;
+
+	const archived = tar.c(archiveOptions2, modulesToArchive);
+	const output = new CustomWriteStream();
+	output.on("close", ()=>
+	{
+		console.log("close", performance.now() - now);
+	});
+	output.on("finish", ()=>
+	{
+		console.log("finish", performance.now() - now);
+		const buffer = Buffer.concat(output.buffers);
+		zlib.gzip(buffer, (error, gzip)=>
+		{
+			console.log("gzipped", performance.now() - now);
+			fs.writeFile(path.join("R:\\Downloads\\archive.tar.gz"), gzip, (error)=>
+			{
+				console.log("write file", performance.now() - now);
+				const dir = "R:\\Downloads";
+				zlib.gunzip(gzip, (error, buffer)=>
+				{
+					if(error) throw error;
+
+					const extractor = tar.extract({cwd: dir, onentry: entry =>
+						{
+							entry.path = entry.path.replace("_AT_", "@");
+							if(entry.path.slice(-1) === "/")
+							{
+								console.log(entry.path.slice(0, -1));
+							}
+							// console.log(entry);
+						}});
+
+					extractor.on("error", error =>
+					{
+						console.error(error);
+					});
+					extractor.on("end", ()=>
+					{
+						console.log("extract", performance.now() - now);
+						/*
+						fs.readdir(dir, (error, directories)=>
+						{
+							for(const i in directories)
+							{
+								const directoryName = directories[i];
+								if(directoryName.slice(0,4) === "_AT_")
+								{
+									const newName = directoryName.replace("_AT_", "@");
+									fs.rename(path.join(dir, directoryName), path.join(dir, newName), ()=>
+									{
+										console.log("renamed " + newName, performance.now() - now);
+									})
+								}
+							}
+						})
+						 */
+					});
+
+					extractor.end(buffer);
+
+				})
+
+				/*
+				const gzipStream = fs.createReadStream("R:\\Downloads\\archive.tar.gz").pipe(zlib.createGunzip());
+
+				const tarExtractor = tar.extract({cwd: dir});
+				const extractor = gzipStream.pipe(tarExtractor);
+				extractor.on("error", error =>
+				{
+					console.error(error);
+				});
+				extractor.on("end", ()=>
+				{
+					console.log("extract", performance.now() - now);
+					fs.readdir(dir, (error, directories)=>
+					{
+						for(const i in directories)
+						{
+							const directoryName = directories[i];
+							if(directoryName.slice(0,4) === "_AT_")
+							{
+								const newName = directoryName.replace("_AT_", "@");
+								fs.rename(path.join(dir, directoryName), path.join(dir, newName), ()=>
+								{
+									console.log("renamed " + newName, performance.now() - now);
+								})
+							}
+						}
+					})
+				});
+
+				if(error) throw error;
+				 */
+			});
+		})
+	})
+// archived.pipe(output);
 }
 
-// const modulesToArchive = ["socket.io", "socket.io-client"];
-const modulesToArchive = packageNames;
-const archiveOptions2 = {};
-archiveOptions2.cwd = path.join(_root, "node_modules");
-archiveOptions2.sync = true;
 
-const archived = tar.c(archiveOptions2, modulesToArchive);
-const output = new CustomWriteStream();
-output.on("close", ()=>
-{
-	console.log("close", performance.now() - now);
-});
-output.on("finish", ()=>
-{
-	console.log("finish", performance.now() - now);
-	const buffer = Buffer.concat(output.buffers);
-	zlib.gzip(buffer, (error, gzip)=>
-	{
-		console.log("gzipped", performance.now() - now);
-		fs.writeFile(path.join("R:\\一時ファイル\\archive.tar.gz"), gzip, (error)=>
-		{
-			console.log("write file", performance.now() - now);
-			if(error) throw error;
-		});
-	})
-})
-archived.pipe(output);
 
 
 
@@ -336,4 +502,5 @@ archive.finalize().then(()=>
 	console.log(reason);
 });
  */
+
 module.exports = RagingSocket;

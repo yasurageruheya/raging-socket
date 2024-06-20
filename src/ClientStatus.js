@@ -13,7 +13,7 @@ let countCpuIdleThreshold = (cpuIdles)=>
 	const length = cpuIdles.length;
 	for(let i=0; i<length; i++)
 	{
-		if(cpuIdles[i] < .5) ++counter
+		if(cpuIdles[i] > .5) ++counter
 	}
 	return --counter;
 };
@@ -61,6 +61,8 @@ class ClientStatus
 		this.gpuLength = 0;
 		this.runningGpuProcesses = 0;
 
+		this.statusReported = false;
+
 		this.toClientSocket = toClientSocket;
 	}
 
@@ -86,7 +88,12 @@ class ClientStatus
 	delegateTask(task)
 	{
 		this.toClientSocket.requests.push(task);
-		task.statusUpdate();
+		try {
+			task.statusUpdate();
+		} catch (error) {
+			console.log(8);
+		}
+
 		if(task.processType === "cpu") this.runningCpuProcesses++;
 		else this.runningGpuProcesses++;
 	}
