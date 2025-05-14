@@ -12,32 +12,36 @@ const path = require("path");
 module.exports = (target, cacheDir, encoding=null, onKeySet)=>
 {
 	const handler = {};
-	/** @type {Promise<*>} */
-	let reading = null;
+	/** @type {Object.<Promise<*>>} */
+	const promiseCaches = {};
+	/** @type {Object.<any>} */
+	const contentCaches = {};
 
 	handler.set = (target, fileName, content, receiver)=>
 	{
-		if(target[fileName] !== content)
+		if(contentCaches[fileName] !== content)
 		{
-			target[fileName] = content;
+			contentCaches[fileName] = content;
 			if(onKeySet) onKeySet(fileName, content);
 			fs.writeFile(path.join(cacheDir, fileName), content, encoding, (error)=>
 			{
 				if(error) throw error;
 			});
 		}
+		return true;
 	}
 
 	handler.get = (target, fileName, receiver)=>
 	{
-		if(reading) return reading;
+		if(typeof promiseCaches[fileName] !== "undefined") return promiseCaches[fileName];
 
-		reading = new Promise(resolve =>
+		promiseCaches[fileName] = new Promise(resolve =>
 		{
-			if(typeof target[fileName] !== "undefined")
+			if(typeof contentCaches[fileName] !== "undefined")
 			{
-				reading = null;
-				resolve(target[fileName]);
+				resolve(contentCaches[fileName]);
+				promiseCaches[fileName] = null;
+				delete promiseCaches[fileName];
 			}
 			else
 			{
@@ -46,15 +50,16 @@ module.exports = (target, cacheDir, encoding=null, onKeySet)=>
 					if(error) resolve(null);
 					else
 					{
-						target[fileName] = content;
+						contentCaches[fileName] = content;
 						if(onKeySet) onKeySet(fileName, content);
 						resolve(content);
 					}
-					reading = null;
+					promiseCaches[fileName] = null;
+					delete promiseCaches[fileName];
 				})
 			}
 		});
-		return reading;
+		return promiseCaches[fileName];
 	}
 	return new Proxy(target, handler);
 }

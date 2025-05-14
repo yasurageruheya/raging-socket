@@ -9,19 +9,20 @@
   "author": "",
   "license": "ISC",
   "devDependencies": {
-    "ip-to-int": "^0.3.1",
-    "kdjn-worker-manager": "^0.1.14"
+    "kdjn-worker-manager": "^0.1.15"
   },
   "dependencies": {
-    "decimalian": "^1.0.1",
+    "ip-to-int": "^0.3.1",
+    "decimalian": "^1.0.2",
     "fs-extra": "^11.2.0",
-    "pathurizer": "^0.0.6",
+    "pathurizer": "^0.0.8",
     "semver": "^7.6.0",
     "socket.io": "^4.7.5",
     "socket.io-client": "^4.7.5",
-    "systeminformation": "^5.22.6",
+    "systeminformation": "^5.25.11",
     "tar": "^6.2.1",
-    "text-file-cache": "^1.1.0",
-    "treelike-map": "^0.0.9"
+    "text-file-cache": "^1.1.1",
+    "time-limited-file-cache": "^0.0.2",
+    "treelike-map": "^0.0.10"
   }
 }

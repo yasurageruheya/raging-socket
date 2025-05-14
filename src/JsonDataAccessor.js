@@ -4,6 +4,8 @@ const getJsonProxy = require("./getJsonProxy");
 
 class JsonDataAccessor
 {
+
+	#setterCallback;
 	/**
 	 *
 	 * @param {string} pathLike
@@ -15,12 +17,16 @@ class JsonDataAccessor
 		this.name = parsed.toFileNameIgnoreExtension;
 		if(parsed.extension !== "json") parsed.extension = "json";
 		this.path = parsed.url;
+		this.#setterCallback = setterCallback;
 
 		/** @type {Object.<string>} */
 		this.data = null;
+	}
 
-		/** @type {Promise<object>} */
-		this.initialize = new Promise(resolve =>
+	/** @returns {Promise<object>} */
+	get initialize()
+	{
+		return new Promise(resolve =>
 		{
 			fs.readFile(this.path, "utf-8", (error, data)=>
 			{
@@ -28,10 +34,10 @@ class JsonDataAccessor
 				{
 					fs.writeFile(this.path, "{}", "utf-8", (error)=>
 					{
-						initializeComplete(this, resolve, error, "{}", setterCallback);
+						initializeComplete(this, resolve, error, "{}", this.#setterCallback);
 					});
 				}
-				initializeComplete(this, resolve, null, data, setterCallback);
+				else initializeComplete(this, resolve, null, data, this.#setterCallback);
 			});
 		});
 	}

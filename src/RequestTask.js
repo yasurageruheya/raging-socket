@@ -6,7 +6,7 @@ let ServerWork;
 
 const EventEmitter = require("events");
 
-const RagingSocketOptions = require("./RagingSocketOptions");
+const Decimalian = require("decimalian");
 
 /** @type {Object.<RequestTask>} */
 const incompleteTasks = {};
@@ -17,8 +17,14 @@ const cpuTaskQueues = {};
 /** @type {Object.<RequestTask[]>} */
 const gpuTaskQueues = {};
 
+/** @type {Object.<RequestTask[]>} */
+const bothTaskQueues = {};
+
 /** @type {Object.<Object.<RequestTask>>} */
 const sentTasks = {};
+
+/** @type {Object.<string>} */
+const taskNames = {};
 
 /** @type {PackageManager} */
 let packageManager;
@@ -29,7 +35,7 @@ class RequestTask extends EventEmitter
 	{
 		ServerWork = require("./ServerWork");
 		RagingSocket = require("./RagingSocket");
-		packageManager = RagingSocket.manager;
+		packageManager = RagingSocket.packageManager;
 	}
 
 	/**
@@ -38,17 +44,36 @@ class RequestTask extends EventEmitter
 	 * @param {function} promiseResolve
 	 * @param {function} promiseReject
 	 * @param {string} processType
+	 * @param {string} taskName
 	 */
-	static queue(workerData, promiseResolve, promiseReject, processType)
+	static queue(workerData, promiseResolve, promiseReject, processType, taskName)
 	{
-		packageManager.getModifiedSourcecodeHashesFromJsPath(workerData.jsPath).then(modifiedSourcecodeHash=>
+		return new Promise(resolve =>
 		{
-			const packageHash = packageManager.getPackageHashFromSourcecodeHash(modifiedSourcecodeHash);
-			const task = new RequestTask(modifiedSourcecodeHash, packageHash, promiseResolve, promiseReject, workerData, processType);
-			RequestTask.insertIntoQueue(task);
-			// task.promise.requiredPackages = packageManager.getPackagesFromSourcecode(modifiedSourcecodeHash);
-			task.promise.requiredPackages = packageManager.getPackagesFromJsPath(workerData.jsPath);
-		})
+			packageManager.getModifiedSourcecodeHashesFromJsPath(workerData.jsPath).then(modifiedSourcecodeHash=>
+			{
+				const logOptions = RagingSocket.options.logOptions;
+				if(logOptions.taskTraceLevel > 2)
+					console.log("js 解析完了:", workerData.jsPath, taskName);
+
+				const packageHash = packageManager.getPackageHashFromSourcecodeHash(modifiedSourcecodeHash);
+				const task = new RequestTask(modifiedSourcecodeHash, packageHash, promiseResolve, promiseReject, workerData, processType, taskName);
+				RequestTask.insertIntoQueue(task);
+				task.promise.requiredPackages = packageManager.getPackagesFromJsPath(workerData.jsPath);
+
+				resolve();
+			});
+		});
+	}
+
+	static getTaskNameFromTaskId(taskId)
+	{
+		return taskNames[taskId] || taskId;
+	}
+
+	static setTaskNameFromTaskId(taskId, taskName)
+	{
+		taskNames[taskId] = taskName;
 	}
 
 	/**
@@ -58,16 +83,18 @@ class RequestTask extends EventEmitter
 	static insertIntoQueue(requestTask)
 	{
 		const sourcecodeHash = requestTask.sourcecodeHash;
-		if(requestTask.processType === "cpu")
+		const queues = (()=>
 		{
-			if(typeof cpuTaskQueues[sourcecodeHash] === "undefined") cpuTaskQueues[sourcecodeHash] = [];
-			cpuTaskQueues[sourcecodeHash].push(requestTask);
-		}
-		else
-		{
-			if(typeof gpuTaskQueues[sourcecodeHash] === "undefined") gpuTaskQueues[sourcecodeHash] = [];
-			gpuTaskQueues[sourcecodeHash].push(requestTask);
-		}
+			switch (requestTask.processType)
+			{
+				case "cpu": return cpuTaskQueues;
+				case "gpu": return gpuTaskQueues;
+				case "both": return bothTaskQueues;
+			}
+		})();
+
+		if(typeof queues[sourcecodeHash] === "undefined") queues[sourcecodeHash] = [];
+		queues[sourcecodeHash].push(requestTask);
 	}
 
 
@@ -76,18 +103,32 @@ class RequestTask extends EventEmitter
 		return incompleteTasks[taskId];
 	}
 
-	static taskComplete(taskId)
+	/**
+	 *
+	 * @return {string[]}
+	 */
+	static get incompleteTaskNames()
 	{
-		const request = incompleteTasks[taskId];
-		delete incompleteTasks[taskId];
-		return request;
+		const array = [];
+		for(const key in incompleteTasks)
+		{
+			array.push(incompleteTasks[key].taskName || incompleteTasks[key].taskId);
+		}
+		return array;
 	}
+
+	static get hasIncompleteTasks() { return Object.keys(incompleteTasks).length > 0; }
+
+	static get incompleteTasksLength() { return Object.keys(incompleteTasks).length; }
 
 	/** @return {Object<RequestTask[]>} */
 	static get cpuTaskQueues() { return cpuTaskQueues; }
 
 	/** @return {Object<RequestTask[]>} */
 	static get gpuTaskQueues() { return gpuTaskQueues; }
+
+	/** @return {Object<RequestTask[]>} */
+	static get bothTaskQueues() { return bothTaskQueues; }
 
 	/**
 	 *
@@ -97,12 +138,13 @@ class RequestTask extends EventEmitter
 	 * @param {function} reject Promise の reject
 	 * @param {object} workerData
 	 * @param {string} processType
+	 * @param {string} taskName
 	 */
-	constructor(sourcecodeHash, packageHash, resolve, reject, workerData, processType)
+	constructor(sourcecodeHash, packageHash, resolve, reject, workerData, processType, taskName)
 	{
 		super();
 		/** @type {string} */
-		this.taskId = Date.now().toString(36) + Math.random().toString(36).slice(-2) + Math.random().toString(36).slice(-2);
+		this.taskId = Decimalian.fromString(Date.now().toString(10) + Math.random().toString(10).slice(2) + Math.random().toString(10).slice(2), 10).toString();
 
 		/** @type {string} */
 		this.sourcecodeHash = sourcecodeHash;
@@ -132,7 +174,7 @@ class RequestTask extends EventEmitter
 		/** @type {number} */
 		this._updatedAt = 0;
 
-		/** @type {NodeJS.Timeout} */
+		/** @type {NodeJS.Timeout|number} */
 		this._timeoutCheckId = 0;
 
 		/** @type {object} */
@@ -141,9 +183,18 @@ class RequestTask extends EventEmitter
 		/** @type {string} */
 		this.processType = processType;
 
+		/** @type {string|null} */
+		this.assignedProcessType = null;
+
+		/** @type {string} */
+		this.taskName = taskName;
+
+		/** @type {ToClientSocket|ToServerSocket} */
+		this.socket = null;
+
 		incompleteTasks[this.taskId] = this;
 
-		//todo: タイムアウト処理作ってない気がする
+		taskNames[this.taskId] = taskName;
 	}
 
 	reserve()
@@ -169,6 +220,7 @@ class RequestTask extends EventEmitter
 		delete outbound._idleNext;
 		delete outbound._idleStart;
 		delete outbound._onTimeout;
+		delete outbound.socket;
 
 		return outbound;
 	}
@@ -177,9 +229,10 @@ class RequestTask extends EventEmitter
 	{
 		timeoutStop(this);
 		this._updatedAt = Date.now();
+
 		this._timeoutCheckId = setTimeout(()=>
 		{
-			if(RagingSocketOptions.autoTimeoutTryAgain && this.autoTimeoutTryAgainCount++ > RagingSocketOptions.maxAutoTimeoutTryAgain)
+			if(RagingSocket.options.autoTimeoutTryAgain && this.autoTimeoutTryAgainCount++ > RagingSocket.options.maxAutoTimeoutTryAgain)
 			{
 				this.tryAgain();
 			}
@@ -189,12 +242,13 @@ class RequestTask extends EventEmitter
 			}
 			this.emit("timeout");
 			this._updatedAt = 0;
-		}, RagingSocketOptions.requestTimeout);
+		}, RagingSocket.options.requestTimeout);
 	}
 
 	assignCancel()
 	{
 		timeoutStop(this);
+		this.pullOut();
 		delete sentTasks[this.sourcecodeHash][this.taskId];
 	}
 
@@ -202,12 +256,39 @@ class RequestTask extends EventEmitter
 	{
 		delete incompleteTasks[this.taskId];
 		delete sentTasks[this.sourcecodeHash][this.taskId];
+		for(const taskId in incompleteTasks)
+		{
+			const task = incompleteTasks[taskId];
+			if(task.taskName === this.taskId)
+			{
+				console.log(task.taskId);
+			}
+		}
+	}
+
+	pullOut()
+	{
+		this.socket.requests.splice(this.socket.requests.indexOf(this), 1);
+		if(this.assignedProcessType === "cpu")
+			this.socket.cpuRequests.splice(this.socket.cpuRequests.indexOf(this), 1);
+		else
+			this.socket.gpuRequests.splice(this.socket.gpuRequests.indexOf(this), 1);
+
+		this.assignedProcessType = null;
 	}
 
 	tryAgain()
 	{
 		const sourcecodeHash = this.sourcecodeHash;
-		const taskQueues = this.processType === "cpu" ? cpuTaskQueues : gpuTaskQueues;
+		const taskQueues = (()=>
+		{
+			switch (this.processType)
+			{
+				case "cpu": return cpuTaskQueues;
+				case "gpu": return gpuTaskQueues;
+				case "both": return bothTaskQueues;
+			}
+		})();
 		const index = taskQueues[sourcecodeHash].indexOf(this);
 		if(index >= 0) taskQueues[sourcecodeHash].splice(index, 1);
 
@@ -222,6 +303,11 @@ const timeoutStop = (request)=>
 	if(request._timeoutCheckId) clearTimeout(request._timeoutCheckId);
 }
 
+/**
+ *
+ * @param {RequestTask} request
+ * @return {RequestTask|{}}
+ */
 const createObject = (request)=>
 {
 	const outbound = {};

@@ -5,17 +5,10 @@ const path = require("path");
 const systemInformation = require("systeminformation");
 const ClientStatus = require("./ClientStatus");
 const {performance} = require("perf_hooks");
-const {EventEmitter} = require("events");
 const {Server} = require("socket.io");
 
 /** @type {typeof PackageManager} */
-const PackageManager = require("./PackageManager");
-
-/** @type {typeof RequestTask} */
-const RequestTask = require("./RequestTask");
-
-/** @type {typeof ClientWork} */
-const ClientWork = require("./ClientWork");
+let PackageManager;
 
 /** @type {typeof ServerWork} */
 const ServerWork = require("./ServerWork");
@@ -30,27 +23,14 @@ const ToClientSocket= require("./ToClientSocket");
 let WorkerManager;
 const {Writable} = require("stream");
 const zlib = require("zlib");
+const {create, Pack} = require("tar");
 
 /** @type {Server} */
 const serverSocket = new Server();
 
-const _root = path.join(__dirname, "../");
 const getGraphicsInfo = systemInformation.graphics();
-/** @type {Promise<string[]>} */
-const sourcecodeFromHashDirectoryRead = new Promise(resolve =>
-{
-	fs.readdir(path.join(_root, "sourcecodeFromHash"), (error, files)=>
-	{
-		if(error) throw error;
-		resolve(files);
-	});
-});
 
 let isInitialized = false;
-
-const emitter = new EventEmitter();
-emitter.setMaxListeners(100);
-
 
 /** @type {Object.<null>} */
 const targets = {};
@@ -58,93 +38,96 @@ const targets = {};
 const myStatus = new ClientStatus();
 myStatus.cpuLength = os.cpus().length;
 /** @type {PackageManager} */
-let manager;
+let packageManager;
+
+const rootCacheDir = require("./Directory").rootCacheDir;
 
 class RagingSocket
 {
 	/** @return {ClientStatus} */
 	static get myStatus() { return myStatus; }
 
-	/** @return {ClientStatus} */
-	get myStatus() { return myStatus; }
+	static get packageManager() { return packageManager; }
 
-	static get plugins() { return plugins; }
-	get plugins() { return plugins; }
-
-	static get manager() { return manager; }
-
-	get manager() { return manager; }
+	static get workerManager() { return WorkerManager; }
 
 	static options = require("./RagingSocketOptions");
+
+	static get rootCacheDir() { return rootCacheDir; }
 
 	/**
 	 *
 	 * @param {function(cpuIdles:number[]):number} func
 	 */
-	static setCheckCpuIdleThresholdPlugin(func)
+	static setCheckCpuIdleThreshold(func)
 	{
 		ClientStatus.setCheckCpuIdleThreshold(func);
 	}
 
 	static addTargetAddressRange(startAddress, endAddress=null)
 	{
-		startAddress = ipToInt(startAddress).toInt();
-		endAddress = endAddress ? ipToInt(endAddress).toInt() : startAddress;
-		if(startAddress > endAddress)
-		{
-			const temp = endAddress;
-			endAddress = startAddress;
-			startAddress = temp;
-		}
-		for(let i = startAddress; i<=endAddress; i++)
+		const {start, end} = createAddressNumber(startAddress, endAddress);
+
+		for(let i = start; i<=end; i++)
 		{
 			targets[i] = null;
 		}
 	}
 
+	static addAcceptsAddressRange(startAddress, endAddress=null)
+	{
+		const {start, end} = createAddressNumber(startAddress, endAddress);
+
+		for(let i = start; i<=end; i++)
+		{
+			ToServerSocket.accepts[i] = null;
+		}
+	}
+
 	static addTargetAddresses(...args)
 	{
-		const length = args.length;
-		for(let i=0; i<length; i++)
-		{
-			if(Array.isArray(args[i])) this.addTargetAddresses(args[i]);
-			else
-			{
-				const ipInt = ipToInt(args[i]).toInt();
-				targets[ipInt] = null;
-			}
-		}
+		addAddresses(targets, ...args);
+	}
+
+	static addAcceptsAddresses(...args)
+	{
+		addAddresses(ToServerSocket.accepts, ...args);
 	}
 
 	static ignoreTargetAddressRange(startAddress, endAddress=null)
 	{
-		startAddress = ipToInt(startAddress).toInt();
-		endAddress = endAddress ? ipToInt(endAddress).toInt() : startAddress;
-		if(startAddress > endAddress)
-		{
-			const temp = endAddress;
-			endAddress = startAddress;
-			startAddress = temp;
-		}
+		const {start, end} = createAddressNumber(startAddress, endAddress);
 
-		for(let i = startAddress; i<=endAddress; i++)
+		for(let i = start; i<=end; i++)
 		{
 			if(typeof targets[i] !== "undefined") delete targets[i];
 		}
 	}
 
+	static ignoreAcceptsAddressRange(startAddress, endAddress=null)
+	{
+		const {start, end} = createAddressNumber(startAddress, endAddress);
+		const accepts = ToServerSocket.accepts;
+
+		for(let i = start; i<=end; i++)
+		{
+			if(typeof accepts[i] !== "undefined") delete accepts[i];
+		}
+	}
+
 	static ignoreTargetAddresses(...args)
 	{
-		const length = args.length;
-		for(let i=0; i<length; i++)
-		{
-			if(Array.isArray(args[i])) this.ignoreTargetAddresses(args[i]);
-			else
-			{
-				const ipInt = ipToInt(args[i]).toInt();
-				if(typeof targets[ipInt] !== "undefined") delete targets[ipInt];
-			}
-		}
+		ignoreAddresses(targets, ...args);
+	}
+
+	static ignoreAcceptsAddresses(...args)
+	{
+		ignoreAddresses(ToServerSocket.accepts, ...args);
+	}
+
+	static get accepts()
+	{
+		return Object.keys(ToServerSocket.accepts);
 	}
 
 	/**
@@ -154,47 +137,40 @@ class RagingSocket
 
 	/**
 	 *
-	 * @param {string} sourcecode
-	 * @param {"cpu"|"gpu"} processType
-	 * @param {object} [workerData=null]
-	 * @return {Promise<ToClientResponse>}
-	 */
-	// static assign(sourcecode, processType, workerData=null)
-	/**
-	 *
 	 * @param {WorkerData} workerData
 	 * @param {"cpu"|"gpu"|"both"} processType
+	 * @param {string} taskName 割り当てたタスクを追跡したい場合に、タスクに名前を付けてください。 FromClientProcessing インスタンスや、ToClientResponse インスタンス にはユニークな taskId プロパティが割り当てられていますが、任意に命名したタスク名（taskName）で追跡したり、ログに表示される際に taskId ではなくタスク名(taskName)で表示されるようになります。
 	 * @return {Promise<ToClientResponse>}
 	 */
-	static assign(workerData, processType)
+	static assign(workerData, processType, taskName="")
 	{
 		if(!isInitialized)
 		{
-			if (!WorkerManager)
+			return new Promise(resolve=>
 			{
-				try {
-					initialize();
-				} catch (error) {
-					throw new Error("RagingSocket.initialize メソッドが呼び出される前に RagingSocket.assign が呼び出されました。先に RagingSocket.initialize(WorkerManager) を呼び出し、WorkerManager クラスを RagingSocket へ渡してください。");
-				}
-			}
-			return new Promise(resolve =>
-			{
-				emitter.on("initialized", () =>
+				initialize().then(()=>
 				{
-					resolve(ServerWork.assign(workerData, processType.toLowerCase()));
+					resolve(ServerWork.assign(workerData, processType.toLowerCase(), taskName));
+				}).catch(()=>
+				{
+					throw new Error("RagingSocket.initialize メソッドが呼び出される前に RagingSocket.assign が呼び出されました。先に RagingSocket.initialize(require('kdjn-worker-manager')) を呼び出して、WorkerManager クラスを RagingSocket へ渡した後、戻り値の Promise インスタンスの完了を待ってから、assign メソッドを使うようにしてください");
 				});
 			});
 		}
 		else
 		{
-			return ServerWork.assign(workerData, processType.toLowerCase());
+			return ServerWork.assign(workerData, processType.toLowerCase(), taskName);
 		}
 	}
 
+	/**
+	 *
+	 * @param {typeof WorkerManager} WorkerManagerClass
+	 * @returns {Promise<void>}
+	 */
 	static initialize(WorkerManagerClass)
 	{
-		initialize(WorkerManagerClass);
+		return initialize(WorkerManagerClass);
 	}
 
 	constructor()
@@ -203,97 +179,137 @@ class RagingSocket
 	}
 }
 
-const initialize = (WorkerManagerClass)=>
+const createAddressNumber = (startAddress, endAddress)=>
 {
-	if(!manager)
+	startAddress = ipToInt(startAddress).toInt();
+	endAddress = endAddress ? ipToInt(endAddress).toInt() : startAddress;
+	if(startAddress > endAddress)
 	{
-		if(WorkerManagerClass) WorkerManager = WorkerManagerClass;
+		const temp = endAddress;
+		endAddress = startAddress;
+		startAddress = temp;
+	}
+	return {startAddress, endAddress};
+}
+
+const addAddresses = (object, ...args)=>
+{
+	const length = args.length;
+	for(let i=0; i<length; i++)
+	{
+		if(Array.isArray(args[i])) addAddresses(object, args[i]);
 		else
 		{
-			try {
-				WorkerManager = require("kdjn-worker-manager");
-			} catch (error) {
-				throw new Error("RagingSocket.initialize() メソッドの引数に kdjn-worker-manager モジュールの WorkerManager クラスが渡されていますか？ RagingSocket を利用するには npm install kdjn-worker-manager でモジュールをインストールしておく必要があります");
-			}
+			const ipInt = ipToInt(args[i]).toInt();
+			object[ipInt] = null;
 		}
-		serverSocket.listen(require("./RagingSocketOptions").socketPort);
-		manager = new PackageManager();
-		ToServerSocket.initialize();
-		ToClientSocket.initialize();
-		ServerWork.initialize();
-		RequestTask.initialize();
-
-		const promises = [];
-		promises.push(new Promise(resolve =>
-		{
-			getGraphicsInfo.then(data=>
-			{
-				for(let i=0; i<data.controllers.length; i++)
-				{
-					const model = data.controllers[i].model.toLowerCase();
-					if(model.includes("geforce") || model.includes("radeon"))
-					{
-						myStatus.gpuLength++;
-					}
-				}
-				resolve();
-			});
-		}))
-
-		promises.push(new Promise(resolve =>
-		{
-			sourcecodeFromHashDirectoryRead.then(hashes =>
-			{
-				const length = hashes.length;
-				for(let i=0; i<length; i++)
-				{
-					myStatus.sourcecodes[hashes[i]] = 1;
-				}
-				resolve();
-			})
-		}));
-
-		promises.push(new Promise(resolve =>
-		{
-			manager.initialize().then(()=>
-			{
-				console.log("searchPartner");
-				serverSocket.on("connection",
-					/** @param {Socket} clientSocket */
-					(clientSocket)=>
-					{
-						ToClientSocket.setupClient(clientSocket);
-					}
-				);
-
-				searchPartner();
-				resolve();
-			})
-		}));
-
-		Promise.all(promises).then(()=>
-		{
-			isInitialized = true;
-			emitter.emit("initialized");
-		})
 	}
 }
 
-const searchPartner=()=>
+const ignoreAddresses = (object, ...args)=>
 {
-	for(const key in targets)
+	const length = args.length;
+	for(let i=0; i<length; i++)
+	{
+		if(Array.isArray(args[i])) ignoreAddresses(object, args[i]);
+		else
+		{
+			const ipInt = ipToInt(args[i]).toInt();
+			if(typeof object[ipInt] !== "undefined") delete object[ipInt];
+		}
+	}
+}
+
+/** @type {Promise<void>|void} */
+let initializePromise;
+
+const initialize = (WorkerManagerClass)=>
+{
+	if(!initializePromise)
+	{
+		initializePromise = new Promise((resolve, reject) =>
+		{
+			if(!packageManager)
+			{
+				if(WorkerManagerClass)
+					WorkerManager = WorkerManagerClass;
+				else
+					reject("RagingSocket.initialize() メソッドの引数に kdjn-worker-manager モジュールの WorkerManager クラスが渡されていますか？ RagingSocket を利用するには npm install kdjn-worker-manager でモジュールをインストールしておく必要があります");
+
+				const RagingSocketOptions = require("./RagingSocketOptions");
+				RagingSocketOptions.initialize();
+				//todo: targetAddress が無くても listen した方が良いのか？？ しない方が良いのか？？
+				serverSocket.listen(RagingSocketOptions.socketPort);
+				PackageManager = require("./PackageManager");
+				packageManager = new PackageManager();
+				ToServerSocket.initialize();
+				ToClientSocket.initialize();
+				ServerWork.initialize();
+				require("./RequestTask").initialize();
+				require("./ToClientResponse").initialize();
+				require("./ReportAssist").initialize();
+				require("./ClientWork").initialize();
+
+				const promises = [];
+				promises.push(new Promise(resolve =>
+				{
+					getGraphicsInfo.then(data=>
+					{
+						for(let i=0; i<data.controllers.length; i++)
+						{
+							const model = data.controllers[i].model.toLowerCase();
+							if(model.includes("geforce") || model.includes("radeon"))
+							{
+								myStatus.gpuLength++;
+							}
+						}
+						resolve();
+					});
+				}));
+
+				// promises.push(Directory.initialize());
+
+				promises.push(new Promise(resolve =>
+				{
+					packageManager.initialize().then(()=>
+					{
+						searchPartner();
+						resolve();
+					})
+				}));
+
+				Promise.all(promises).then(()=>
+				{
+					isInitialized = true;
+					resolve();
+				})
+			}
+			else resolve();
+		});
+	}
+	return initializePromise;
+}
+
+const searchPartner = ()=>
+{
+	if(Object.keys(targets).length)
+	{
+		serverSocket.on("connection",
+			/** @param {Socket} clientSocket */
+			(clientSocket)=>
+			{
+				//todo: clientSocket が TargetAddress として指定された物と一致する IP アドレスかどうかのチェックが必要だと思う！！！
+				ToClientSocket.setupClient(clientSocket);
+			}
+		);
+	}
+
+	const accepts = ToServerSocket.accepts;
+	for(const key in accepts)
 	{
 		ToServerSocket.connect(ipToInt(key).toIP());
 	}
 }
-
-const plugins = {};
-
-/**
- *
- * @type {function(number[]): number}
- */
-plugins.countCpuIdleThreshold = ClientStatus.countCpuIdleThreshold;
 
 setTimeout(()=>
 {

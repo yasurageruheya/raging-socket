@@ -1,29 +1,49 @@
 /** @type {Object.<ToClientResponse>} */
 const instances = [];
 
+/** @type {typeof RagingSocket} */
+let RagingSocket;
+
 class ToClientResponse
 {
-	static getInstance(taskId, toClientSocket)
+	static initialize()
 	{
-		if(typeof instances[taskId] === "undefined") instances[taskId] = new ToClientResponse(taskId, toClientSocket);
+		RagingSocket = require("./RagingSocket");
+	}
+
+	static getInstance(taskId, toClientSocket, taskName)
+	{
+		if(typeof instances[taskId] === "undefined") instances[taskId] = new ToClientResponse(taskId, toClientSocket, taskName);
 		return instances[taskId];
 	}
+
+	/** @type {string} */
+	#taskId;
+
+	/** @type {string} */
+	#taskName;
+
+	/** @type {ToClientSocket} */
+	toClientSocket;
 
 	/**
 	 *
 	 * @param {string} taskId
 	 * @param {ToClientSocket} toClientSocket
+	 * @param {string} taskName
 	 */
-	constructor(taskId, toClientSocket)
+	constructor(taskId, toClientSocket, taskName)
 	{
-		/** @type {string} */
-		this.taskId = taskId;
-
-		/** @type {ToClientSocket} */
+		this.#taskId = taskId;
+		this.#taskName = taskName;
 		this.toClientSocket = toClientSocket;
 
 		instances.push(this);
 	}
+
+	get taskName() { return this.#taskName }
+
+	get taskId() { return this.#taskId; }
 
 	/**
 	 *

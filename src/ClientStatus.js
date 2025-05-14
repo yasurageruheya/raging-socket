@@ -54,16 +54,59 @@ class ClientStatus
 		 */
 		this._idleCpuLength = 0;
 
-		this.runningCpuProcesses = 0;
+		/** @type {string[]} */
+		this.runningCpuProcesses = [];
+		/** @type {string[]} */
+		this.runningGpuProcesses = [];
 		/** @type {Object.<dependency>} */
 		this.packages = {};
-		this.sourcecodes = {};
 		this.gpuLength = 0;
-		this.runningGpuProcesses = 0;
 
-		this.statusReported = false;
-
+		this.canClaimStatusReport = true;
 		this.toClientSocket = toClientSocket;
+	}
+
+	/** @return {string[]} */
+	get cpuTasks()
+	{
+		return this.#getTasks("cpu");
+	}
+
+	/** @return {string[]} */
+	get gpuTasks()
+	{
+		return this.#getTasks("gpu");
+	}
+
+	/**
+	 *
+	 * @param {"cpu"|"gpu"} processType
+	 * @return {string[]}
+	 */
+	#getTasks(processType)
+	{
+		processType = processType.toLowerCase();
+		let length;
+		const tasks = [];
+		if(this.toClientSocket)
+		{
+			const requests = this.toClientSocket[processType+"Requests"];
+			length = requests.length;
+			for(let i=0; i<length; i++)
+			{
+				tasks.push(requests[i].taskId);
+			}
+		}
+
+		const processes = this["running"+processType.charAt(0).toUpperCase()+"puProcesses"];
+		length = processes.length;
+		for(let i=0; i<length; i++)
+		{
+			if(!tasks.includes(processes[i]))
+				tasks.push(processes[i]);
+		}
+
+		return tasks;
 	}
 
 	get idleCpuLength()
@@ -72,33 +115,36 @@ class ClientStatus
 			this._idleCpuLength = countCpuIdleThreshold(this.cpuIdles);
 			this.cpuIdleThresholdCounted = true;
 		}
-		return this._idleCpuLength - this.runningCpuProcesses;
+		return this._idleCpuLength - this.cpuTasks.length;
 	}
 
 
 	get idleGpuLength()
 	{
-		return this.gpuLength - this.runningGpuProcesses;
+		return this.gpuLength - this.gpuTasks.length;
 	}
 
 	/**
 	 *
 	 * @param {RequestTask} task
+	 * @param {string} processType
 	 */
-	delegateTask(task)
+	delegateTask(task, processType)
 	{
-		this.toClientSocket.requests.push(task);
-		try {
-			task.statusUpdate();
-		} catch (error) {
-			console.log(8);
-		}
+		task.assignedProcessType = processType;
 
-		if(task.processType === "cpu") this.runningCpuProcesses++;
-		else this.runningGpuProcesses++;
+		const toClientSocket = this.toClientSocket;
+
+		toClientSocket.requests.push(task);
+		toClientSocket.reserveRequests.push(task);
+		if(processType === "cpu") toClientSocket.cpuRequests.push(task);
+		else toClientSocket.gpuRequests.push(task);
+		task.socket = toClientSocket;
+
+		task.statusUpdate();
 	}
 
-	get runningProcesses() { return this.runningCpuProcesses + this.runningGpuProcesses; }
+	get runningProcesses() { return [...this.runningCpuProcesses, ...this.runningGpuProcesses]; }
 }
 
 module.exports = ClientStatus;

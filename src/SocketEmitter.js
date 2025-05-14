@@ -9,43 +9,37 @@ for(const key in SocketMessage)
 
 class SocketEmitter
 {
-	constructor(ipAddress)
-	{
-		/** @type {Socket} */
-		this.socket = null;
+	/** @type {ReportAssist} */
+	reportAssist;
 
-		/** @type {string} */
+	/** @type {Socket} */
+	socket;
+
+	/** @type {string} */
+	ipAddress;
+
+	/** @type {PackageManager} */
+	packageManager;
+
+	/**
+	 *
+	 * @param {string} ipAddress
+	 * @param {PackageManager} packageManager
+	 */
+	constructor(ipAddress, packageManager)
+	{
 		this.ipAddress = ipAddress;
+
+		this.packageManager = packageManager;
 	}
 
 	on(messageCode, func)
 	{
 		this.socket.on(messageCode, (...args)=>
 		{
-			//todo: S2C_TASK_SUPPLEMENTATION の時、各 report の SocketMessage の内容を出さなきゃ！！！！
 			if(logOptions.connectionInfo)
-			{
 				reformatLog(this, messageCode, ", << FROM", ...args);
-				// const reports = (()=>
-				// {
-				// 	if(Array.isArray(args)) return Object.assign({}, args[0]);
-				// 	return args;
-				// })();
-				// switch (messageCode)
-				// {
-				// 	case SocketMessage.S2C_TASK_SUPPLEMENTATION:
-				// 	case SocketMessage.C2S_REPORT_TASKS_STATUS:
-				// 		for(const key in reports)
-				// 		{
-				// 			const rpt = reports[key];
-				// 			rpt.status = messages[rpt.status] || rpt.status;
-				// 		}
-				// 		break;
-				// }
-				//
-				// messageCode = messages[messageCode] || messageCode;
-				// console.log(messageCode + ", << FROM", this.ipAddress, reports);
-			}
+
 			func(...args);
 		})
 	}
@@ -55,11 +49,8 @@ class SocketEmitter
 		this.socket.once(messageCode, (...args)=>
 		{
 			if(logOptions.connectionInfo)
-			{
 				reformatLog(this, messageCode, ", << FROM", ...args);
-				// messageCode = messages[messageCode] || messageCode;
-				// console.log(messageCode + ", << FROM", this.ipAddress, ...args);
-			}
+
 			func(...args);
 		})
 	}
@@ -67,9 +58,8 @@ class SocketEmitter
 	emit(messageCode, ...args)
 	{
 		if(logOptions.connectionInfo)
-		{
 			reformatLog(this, messageCode, ", TO >>", ...args);
-		}
+
 		this.socket.emit(messageCode, ...args);
 	}
 
@@ -86,6 +76,12 @@ const reformatLog = (emitter, messageCode, dest, ...args)=>
 		if(messageCode === SocketMessage.S2C_SEND_VARS)
 		{
 			return Object.assign(args);
+		}
+		else if(messageCode === SocketMessage.S2C_SEND_SPLIT_BUFFER_DATA)
+		{
+			const rpt = {};
+			rpt[args[0]] = {bufferName: args[2], bufferHash: args[1]};
+			return rpt;
 		}
 		else if(messageCode === SocketMessage.S2C_SEND_TRANSFER_DATA)
 		{
@@ -115,6 +111,7 @@ const reformatLog = (emitter, messageCode, dest, ...args)=>
 			{
 				const rpt = Object.assign({}, reports[key]);
 				rpt.status = messages[rpt.status] || rpt.status;
+				if(rpt.reason) rpt.reason = messages[rpt.reason];
 				reports[key] = rpt;
 			}
 			break;

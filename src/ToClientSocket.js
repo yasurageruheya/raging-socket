@@ -21,9 +21,24 @@ const SocketEmitter = require("./SocketEmitter");
 /** @type {PackageManager} */
 let packageManager;
 
-const RagingSocketOptions = require("./RagingSocketOptions");
+let lastClaimStatusTime = 0;
+let isClaimStatusQueue = false;
+
 const SocketMessage = require("./SocketMessage");
+const RagingSocketError = require("./RagingSocketError")
 const {EventEmitter} = require("events");
+const {createHash} = require("crypto");
+const Decimalian = require("decimalian");
+
+/** @type {typeof ReportAssist} */
+let ReportAssist;
+
+/** Object.<Array.<processing:FromClientProcessing, request:RequestTask>> */
+const receivingBufferHash = {};
+
+
+/** @type {TimeLimitedFileCache} */
+let timeLimitedBufferCache;
 
 /** @type {Object.<ToClientSocket>} */
 const instances = {};
@@ -45,9 +60,12 @@ class ToClientSocket extends SocketEmitter
 		RequestTask = require("./RequestTask");
 		ToClientResponse = require("./ToClientResponse");
 		ServerWork = require("./ServerWork");
+		ReportAssist = require("./ReportAssist");
 		RagingSocket = require("./RagingSocket");
-		packageManager = RagingSocket.manager;
-		console.log("RagingSocketOptions.logOptions.connectionInfo : ", RagingSocketOptions.logOptions.connectionInfo);
+		packageManager = RagingSocket.packageManager;
+
+		const TimeLimitedFileCache = require("time-limited-file-cache");
+		timeLimitedBufferCache = TimeLimitedFileCache.fromDirectory(RagingSocket.options.bufferCacheDirectory, RagingSocket.options.bufferCacheMemoryTTL, RagingSocket.options.bufferCacheFileTTL);
 	}
 
 	static get cpuWorkableClients()
@@ -82,12 +100,13 @@ class ToClientSocket extends SocketEmitter
 	 */
 	static findClientsFromSourcecodeHash(sourcecodeHash, workableClients=null)
 	{
+		const __PROJECT_SCOPE_MODULE = packageManager.__PROJECT_SCOPE_MODULE;
 		/** @type {Object.<ToClientSocket>} */
 		const result = {};
 		if(!workableClients) workableClients = ToClientSocket.cpuWorkableClients;
 		for(const address in workableClients)
 		{
-			if(typeof workableClients[address].status.sourcecodes[sourcecodeHash] !== "undefined")
+			if(typeof workableClients[address].status.packages[__PROJECT_SCOPE_MODULE][sourcecodeHash] !== "undefined")
 			{
 				result[address] = workableClients[address];
 			}
@@ -98,17 +117,21 @@ class ToClientSocket extends SocketEmitter
 
 	static claimStatus()
 	{
-		for(const address in instances)
+		const now = Date.now();
+		const reclaimTime = RagingSocket.options.reclaimStatusReportTime;
+		if((now - lastClaimStatusTime) < reclaimTime)
 		{
-			const toClientSocket = instances[address];
-			if(toClientSocket.status.statusReported)
+			claimStatusFunc();
+		}
+		else
+		{
+			if(!isClaimStatusQueue)
 			{
-				toClientSocket.emit(SocketMessage.S2C_CLAIM_STATUS);
-				toClientSocket.status.statusReported = false;
+				isClaimStatusQueue = true;
+				setTimeout(claimStatusFunc, reclaimTime - (now - lastClaimStatusTime));
 			}
 		}
 	}
-
 	/**
 	 *
 	 * @param {Socket} clientSocket
@@ -125,7 +148,9 @@ class ToClientSocket extends SocketEmitter
 
 	constructor(ipAddress)
 	{
-		super(ipAddress);
+		super(ipAddress, packageManager);
+
+		this.reportAssist = ReportAssist.get(this);
 
 		/** @type {Socket} */
 		this.socket = null;
@@ -134,10 +159,22 @@ class ToClientSocket extends SocketEmitter
 		this.status = new ClientStatus();
 
 		/** @type {RequestTask[]|object[]} */
+		this.reserveRequests = [];
+
+		/** @type {RequestTask[]|object[]} */
 		this.requests = [];
+
+		/** @type {RequestTask[]|object[]} */
+		this.cpuRequests = [];
+
+		/** @type {RequestTask[]|object[]} */
+		this.gpuRequests = [];
 
 		/** @type {Array.<Promise.<*>>} */
 		this.promises = [];
+
+		/** @type {number} */
+		this.lastReportStatusTime = 0;
 	}
 
 	/**
@@ -148,17 +185,52 @@ class ToClientSocket extends SocketEmitter
 	 */
 	transfer(response, data, dataName="")
 	{
+		if(!data) console.log("!!!data is null!!!");
 		return new Promise(resolve =>
 		{
 			const taskId = response.taskId;
 			const request = RequestTask.getIncompleteTask(taskId);
 			request.statusUpdate();
-			this.once(SocketMessage.C2S_RECEIVED_TRANSFER_DATA, ()=>
+			const logOptions = RagingSocket.options.logOptions;
+			if(data instanceof ArrayBuffer && data.byteLength > 1_000_000)
 			{
-				request.statusUpdate();
-				resolve(response);
-			})
-			this.emit(SocketMessage.S2C_SEND_TRANSFER_DATA, taskId, data, dataName);
+				const bufferHexHash = createHash("sha256").update(new Uint8Array(Buffer.from(data).buffer)).digest("hex");
+				const bufferHash = Decimalian.fromString(bufferHexHash, 16).toString();
+				if(logOptions.bufferHashCheck)
+					console.log("送信予定の大容量データハッシュ値:", bufferHash, ", byteLength:", Buffer.byteLength(data));
+
+				timeLimitedBufferCache.write(bufferHash, data);
+
+				this.once(SocketMessage.C2S_RECEIVED_ALL_SPLIT_BUFFER_DATA, (bufferHash) =>
+				{
+					request.statusUpdate();
+					resolve(response);
+
+					if(logOptions.taskTraceLevel > 2)
+						console.log("クライアントから全ての分割データ受信を確認:", this.ipAddress, RequestTask.getTaskNameFromTaskId(response.taskId));
+				});
+
+				if(logOptions.taskTraceLevel > 2)
+					console.log("クライアントへ大容量分割データ送信を通知:", this.ipAddress, RequestTask.getTaskNameFromTaskId(response.taskId));
+
+				this.emit(SocketMessage.S2C_SEND_SPLIT_BUFFER_DATA, taskId, bufferHash, dataName);
+			}
+			else
+			{
+				this.once(SocketMessage.C2S_RECEIVED_TRANSFER_DATA, ()=>
+				{
+					request.statusUpdate();
+					resolve(response);
+
+					if(logOptions.taskTraceLevel > 2)
+						console.log("クライアントの大容量データ受信を確認:", this.ipAddress, RequestTask.getTaskNameFromTaskId(response.taskId));
+				});
+
+				if(logOptions.taskTraceLevel > 2)
+					console.log("クライアントに大容量データを送信:", this.ipAddress, RequestTask.getTaskNameFromTaskId(response.taskId));
+
+				this.emit(SocketMessage.S2C_SEND_TRANSFER_DATA, taskId, data, dataName);
+			}
 		})
 	}
 
@@ -174,11 +246,19 @@ class ToClientSocket extends SocketEmitter
 		{
 			const taskId = response.taskId;
 			const request = RequestTask.getIncompleteTask(taskId);
+			const logOptions = RagingSocket.options.logOptions;
 			this.once(SocketMessage.C2S_RECEIVED_VARS, ()=>
 			{
 				request.statusUpdate();
 				resolve(response);
+
+				if(logOptions.taskTraceLevel > 2)
+					console.log("クライアントの変数受信を確認:", this.ipAddress, RequestTask.getTaskNameFromTaskId(response.taskId));
 			});
+
+			if(logOptions.taskTraceLevel > 2)
+				console.log("クライアントに変数を送信:", this.ipAddress, RequestTask.getTaskNameFromTaskId(response.taskId));
+
 			this.emit(SocketMessage.S2C_SEND_VARS, taskId, data);
 			request.statusUpdate();
 		});
@@ -192,14 +272,23 @@ class ToClientSocket extends SocketEmitter
 
 	start(response)
 	{
-		return new Promise((resolve) =>
+		return new Promise((resolve, reject) =>
 		{
 			const taskId = response.taskId;
 			const request = RequestTask.getIncompleteTask(taskId);
+			const logOptions = RagingSocket.options.logOptions;
 			this.once(SocketMessage.C2S_TASK_STARTED, ()=>
 			{
-				resolve(new FromClientProcessing(request));
+				if(logOptions.taskTraceLevel > 0)
+					console.log("クライアントのタスク開始を確認:", this.ipAddress, RequestTask.getTaskNameFromTaskId(response.taskId));
+
+				resolve(processing);
 			});
+
+			if(logOptions.taskTraceLevel > 2)
+				console.log("クライアントへタスク開始を要求:", this.ipAddress, RequestTask.getTaskNameFromTaskId(response.taskId));
+
+			const processing = new FromClientProcessing(request, reject);
 			this.emit(SocketMessage.S2C_TASK_START, taskId);
 			request.statusUpdate();
 		});
@@ -214,27 +303,47 @@ class ToClientSocket extends SocketEmitter
 const setup = (toClientSocket, clientSocket, ipAddress)=>
 {
 	toClientSocket.socket = clientSocket;
-	toClientSocket.status.toClientSocket = toClientSocket;
-	ToServerSocket.connect(ipAddress);
-	toClientSocket.emit(SocketMessage.S2C_CLAIM_STATUS);
 	const status = toClientSocket.status;
-	status.statusReported = false;
+	status.toClientSocket = toClientSocket;
+	// ToServerSocket.connect(ipAddress);
+	toClientSocket.emit(SocketMessage.S2C_CLAIM_STATUS);
+	status.canClaimStatusReport = true;
+
+	const reportAssist = ReportAssist.get(toClientSocket);
+
+	const logOptions = RagingSocket.options.logOptions;
 
 	toClientSocket.on(SocketMessage.C2S_STATUS_REPORT,
 		/** @param {ClientStatus} clientStatusReport */
 		(clientStatusReport)=>
 		{
+			toClientSocket.lastReportStatusTime = Date.now();
 			for(const key in clientStatusReport)
 			{
 				status[key] = clientStatusReport[key];
 			}
 			status.cpuIdleThresholdCounted = false;
 
+			if(logOptions.showClientStatusReport)
+				reportAssist.logOutputStatusReport(status, toClientSocket.ipAddress);
+
+			if(logOptions.showIncompleteTasks)
+			{
+				const incompleteTaskNames = RequestTask.incompleteTaskNames;
+				const length = incompleteTaskNames.length;
+				console.log("未完了タスク:", length, '"' + incompleteTaskNames.slice(-10).join('", "') + '"' + (length > 10 ? "..." : ""));
+			}
+
 			if(status.idleCpuLength > 0 || status.idleGpuLength > 0)
 			{
 				ServerWork.reassign();
 			}
-			status.statusReported = true;
+			else if(RequestTask.hasIncompleteTasks)
+			{
+				// console.log("reclaim!!");
+				setTimeout(ToClientSocket.claimStatus, 1000);
+			}
+			status.canClaimStatusReport = true;
 		});
 
 	toClientSocket.on(SocketMessage.C2S_REPORT_TASKS_STATUS,
@@ -248,61 +357,40 @@ const setup = (toClientSocket, clientSocket, ipAddress)=>
 			{
 				const report = reports[taskId];
 				const request = RequestTask.getIncompleteTask(taskId);
+				if(!request) continue;
 				switch (report.status)
 				{
 					case SocketMessage.C2S_UNACCEPTABLE_TASK:
+						reportAssist.taskRejected(report, request);
 						delete reports[taskId];
-						request.assignCancel();
 						reassign.push(request);
 						break;
 					case SocketMessage.C2S_REQUEST_SOURCECODE:
-						report.status = SocketMessage.S2C_RESPONSE_SOURCECODE;
-						report.sourcecode = packageManager.getSourcecodeFromSourcecodeHash(report.sourcecodeHash);
+						promises.push(reportAssist.responseSourcecode(report, request));
 						break;
 					case SocketMessage.C2S_REQUEST_PACKAGE_BUFFER_FROM_PACKAGE_HASH:
-						promises.push(new Promise(resolve =>
-						{
-							packageManager.getPackageBufferFromPackageHash(report.shortfallPackageHash).then((buffer)=>
-							{
-								if(buffer)
-								{
-									report.status = SocketMessage.S2C_RESPONSE_PACKAGE_BUFFER;
-									report.buffer = buffer;
-								}
-								else
-								{
-									report.status = SocketMessage.S2C_REQUEST_PACKAGES_FROM_PACKAGE_HASH;
-								}
-								resolve();
-							})
-						}));
+						promises.push(reportAssist.packageBufferRequested(report, request));
 						break;
 					case SocketMessage.C2S_RESPONSE_PACKAGES_FROM_PACKAGE_HASH:
-						promises.push(new Promise(resolve =>
-						{
-							packageManager.getPackageBufferFromPackages(report.shortfallPackages).then((buffer)=>
-							{
-								report.status = SocketMessage.S2C_RESPONSE_PACKAGE_BUFFER;
-								report.buffer = buffer;
-								resolve();
-							})
-						}));
+						promises.push(reportAssist.receiveShortfallPackages(report, request));
 						break;
 					case SocketMessage.C2S_CONFIRM_TASKS:
-						report.status = SocketMessage.S2C_SEND_WORKER_DATA;
-						report.workerData = request.workerData;
+						reportAssist.sendWorkerData(report, request);
+
 						break;
 				}
 
 				if(typeof reports[taskId] !== "undefined") request.statusUpdate();
 			}
 
+			reportAssist.logOutput();
+
 			Promise.all(promises).then(()=>
 			{
+				//todo: reportAssist.sendWorkerData を通ってきたっぽいけど、タスク開始要求をクライアントに送らない事があった！！！
+				reportAssist.logOutput();
 				if(Object.keys(reports).length)
-				{
 					toClientSocket.emit(SocketMessage.S2C_TASK_SUPPLEMENTATION, reports);
-				}
 			});
 
 			if(reassign.length) ServerWork.reassign(reassign);
@@ -310,9 +398,15 @@ const setup = (toClientSocket, clientSocket, ipAddress)=>
 
 	toClientSocket.on(SocketMessage.C2S_WORKER_READY, report =>
 	{
-		const request = RequestTask.getIncompleteTask(report.taskId);
+		const taskId = report.taskId
+		const request = RequestTask.getIncompleteTask(taskId);
+		if(!request)
+			throw new Error("non exist task:" + RequestTask.getTaskNameFromTaskId(taskId));
 		request.statusUpdate();
-		request.resolve(ToClientResponse.getInstance(report.taskId, toClientSocket));
+		request.resolve(ToClientResponse.getInstance(taskId, toClientSocket, request.taskName));
+
+		if(logOptions.taskTraceLevel > 2)
+			console.log("クライアントからタスク開始準備完了を確認:", toClientSocket.ipAddress, RequestTask.getTaskNameFromTaskId(taskId));
 	});
 
 
@@ -322,90 +416,327 @@ const setup = (toClientSocket, clientSocket, ipAddress)=>
 		const taskId = report.taskId;
 		const request = RequestTask.getIncompleteTask(taskId);
 		request.markComplete();
+		/** @type {FromClientProcessing|any} */
 		const processing = clientProcessingPool[taskId];
 		processing.status = "complete";
 		processing.result = report.result;
 		processing.resolve(report.result);
+		console.log("processing.resolve");
 		processing.emit("complete", processing);
 		toClientSocket.emit(SocketMessage.S2C_RECEIVE_RESULT);
 		delete clientProcessingPool[report.taskId];
+
+		if(logOptions.taskTraceLevel > 2)
+			console.log("クライアントのタスク完了を確認:", toClientSocket.ipAddress, RequestTask.getTaskNameFromTaskId(taskId));
 	});
 
 	toClientSocket.on(SocketMessage.C2S_TASK_COMPLETE_AND_AFTER_SEND_BUFFER, report =>
 	{
+		/** @type {FromClientProcessing|any} */
 		const processing = clientProcessingPool[report.taskId];
-		const bufferId = report.result;
-		const segments = [];
-		const onReceiveBuffer = (arrayBuffer) =>
+		const taskId = report.taskId;
+		const request = RequestTask.getIncompleteTask(taskId);
+		const bufferHash = report.result;
+
+		const bufferHashCheck = logOptions.bufferHashCheck;
+
+		if(logOptions.taskTraceLevel > 2)
+			console.log("クライアントのタスク完了と完了後データ送信準備完了を確認:", toClientSocket.ipAddress, RequestTask.getTaskNameFromTaskId(taskId));
+
+		new Promise(resolve=>
 		{
-			if(arrayBuffer instanceof Buffer) arrayBuffer = arrayBuffer.buffer;
-			if(arrayBuffer !== "end")
+			if(timeLimitedBufferCache) timeLimitedBufferCache.read(bufferHash).then(data => resolve(data));
+			else resolve();
+		}).then(data=>
+		{
+			if(data)
 			{
-				segments.push(arrayBuffer);
-				toClientSocket.emit(bufferId);
+				if(logOptions.taskTraceLevel > 2)
+					console.log("クライアントが送信予定のデータは既にサーバーに保存されているデータと一致したため、データの送信要求をスキップ:", toClientSocket.ipAddress, RequestTask.getTaskNameFromTaskId(taskId));
+
+				toClientSocket.emit(SocketMessage.S2C_RESULT_BUFFER_RECEIVED, bufferHash);
+				request.markComplete();
+				processing.status = "complete";
+				processing.result = data;
+				processing.resolve(data);
+
+				processing.emit("complete", processing);
 			}
 			else
 			{
-				toClientSocket.off(bufferId, onReceiveBuffer);
-				const byteLength = (segments.length - 1) * 1_000_000 +
-					segments[segments.length - 1].byteLength;
-				const byteArray = new Uint8Array(byteLength);
-				const len = segments.length;
-				for(let i=0; i<len; i++)
+				if(typeof receivingBufferHash[bufferHash] === "undefined") receivingBufferHash[bufferHash] = [];
+				receivingBufferHash[bufferHash].push({processing, request});
+				if(receivingBufferHash[bufferHash].length > 1)
+					return;
+
+				const segments = [];
+				const onReceiveBuffer = (arrayBuffer) =>
 				{
-					byteArray.set(segments.shift(), i * 1_000_000);
+					if(arrayBuffer !== "end")
+					{
+						segments.push(arrayBuffer);
+						if(bufferHashCheck)
+						{
+							const fragmentBufferHash = Decimalian.fromString(createHash("sha256").update(new Uint8Array(arrayBuffer)).digest("hex"), 16).toString();
+							console.log("クライアントから受信予定の全データのハッシュ:", bufferHash, ", 受信した分割データのハッシュ:", fragmentBufferHash, ", byteLength:", arrayBuffer.byteLength);
+						}
+						toClientSocket.emit(eventName);
+					}
+					else
+					{
+						toClientSocket.off(eventName, onReceiveBuffer);
+
+						if(!segments.length)
+						{
+							if(logOptions.taskTraceLevel > 2)
+								console.log("クライアントから受信予定の全データが全て送られてこなかったため、データ送信を再要求します。再要求する全データのハッシュ:", bufferHash, RequestTask.getTaskNameFromTaskId(taskId));
+
+							toClientSocket.on(eventName, onReceiveBuffer);
+							toClientSocket.emit(SocketMessage.S2C_CLAIM_RESULT_BUFFER, bufferHash);
+							return;
+						}
+
+						const byteLength = (segments.length - 1) * 1_000_000 + segments[segments.length - 1].byteLength;
+						const byteArray = new Uint8Array(byteLength);
+						const len = segments.length;
+						const hashes = [];
+						for(let i=0; i<len; i++)
+						{
+							const fragment = new Uint8Array(segments.shift());
+							if(bufferHashCheck)
+							{
+								const fragmentBufferHash = Decimalian.fromString(createHash("sha256").update(fragment).digest("hex"), 16).toString();
+								hashes.push(fragmentBufferHash);
+							}
+
+							byteArray.set(fragment, i * 1_000_000);
+						}
+
+						if(bufferHashCheck)
+							console.log("クライアントから受信予定の全データのハッシュ:", bufferHash, ", 受信した分割データのハッシュ[", hashes.join(","), "]");
+
+						const resultBuffer　 = byteArray.buffer;
+						const receivedBufferHash = Decimalian.fromString(createHash("sha256").update(Buffer.from(byteArray)).digest("hex"), 16).toString();
+
+						if(bufferHashCheck)
+							console.log("クライアントから受信予定の全データのハッシュ:", bufferHash, ", byteLength:", Buffer.byteLength(resultBuffer), ", 受信後の結合データのハッシュ:", receivedBufferHash);
+
+
+						if(receivedBufferHash !== bufferHash)
+						{
+							if(logOptions.taskTraceLevel > 2)
+								console.log("クライアントから受信予定の全データのハッシュ'", bufferHash, "' と、受信後の結合データのハッシュ'", receivedBufferHash, "' が一致しなかったので、クライアントにデータ送信を再要求します。", RequestTask.getTaskNameFromTaskId(taskId));
+							// throw new Error("received result buffer hash error." + "receivedFullBufferHash : " + receivedBufferHash +", bufferHash : " + bufferHash);
+							toClientSocket.on(eventName, onReceiveBuffer);
+							toClientSocket.emit(SocketMessage.S2C_CLAIM_RESULT_BUFFER, bufferHash);
+						}
+						else
+						{
+							if(timeLimitedBufferCache) timeLimitedBufferCache.write(receivedBufferHash, resultBuffer);
+
+							const length = receivingBufferHash[bufferHash].length;
+							for(let i=0; i<length; i++)
+							{
+								const {processing, request} = receivingBufferHash[bufferHash][i];
+								request.markComplete();
+								processing.status = "complete";
+								processing.result = resultBuffer;
+								processing.resolve(resultBuffer);
+
+								// console.log("processing.resolve");
+								processing.emit("complete", processing);
+							}
+							toClientSocket.emit(SocketMessage.S2C_RESULT_BUFFER_RECEIVED, bufferHash);
+
+							receivingBufferHash[bufferHash] = null;
+							delete receivingBufferHash[bufferHash];
+							clientProcessingPool[report.taskId] = null;
+							delete clientProcessingPool[report.taskId];
+
+							if(logOptions.taskTraceLevel > 2)
+								console.log("クライアントへタスク完了後データ受信完了を通知:", toClientSocket.ipAddress, RequestTask.getTaskNameFromTaskId(taskId));
+						}
+					}
 				}
-				const resultBuffer = byteArray.buffer;
-				console.log(bufferId, "byteLength:"+Buffer.byteLength(resultBuffer));
+				const eventName = "s2c_"+bufferHash;
+				toClientSocket.on(eventName, onReceiveBuffer);
 
-				const request = RequestTask.getIncompleteTask(report.taskId);
-				toClientSocket.emit(SocketMessage.S2C_RESULT_BUFFER_RECEIVED, bufferId);
-				request.markComplete();
-				processing.status = "complete";
-				processing.result = resultBuffer;
-				processing.resolve(resultBuffer);
-				processing.emit("complete", processing);
+				if(logOptions.taskTraceLevel > 2)
+					console.log("クライアントへタスク完了後データを要求:", toClientSocket.ipAddress, RequestTask.getTaskNameFromTaskId(taskId));
+
+				toClientSocket.emit(SocketMessage.S2C_CLAIM_RESULT_BUFFER, bufferHash);
 			}
-		}
-		toClientSocket.on(bufferId, onReceiveBuffer);
-		toClientSocket.emit(SocketMessage.S2C_CLAIM_RESULT_BUFFER, bufferId);
-	})
+		});
+	});
 
+	toClientSocket.on(SocketMessage.C2S_CLAIM_SPLIT_BUFFER_DATA, (bufferHash)=>
+	{
+		const isBufferHashCheck = RagingSocket.options.logOptions.bufferHashCheck;
+
+		new Promise(resolve =>
+		{
+			timeLimitedBufferCache.read(bufferHash).then(data=> resolve(data));
+
+		}).then(/** @param {ArrayBuffer|undefined} originalBuffer */ originalBuffer =>
+		{
+			if(!originalBuffer)
+				throw RagingSocketError.getTimeLimitedFileCacheTTLError(bufferHash);
+
+			const segments = [];
+			const byteLength = originalBuffer.byteLength;
+			if(isBufferHashCheck)
+			{
+				const originalBufferHash = Decimalian.fromString(createHash("sha256").update(new Uint8Array(originalBuffer)).digest("hex"), 16).toString();
+				console.log("scheduled to send original buffer hash:", originalBufferHash, ", byteLength:", byteLength);
+			}
+			for(let i=0; i<byteLength; i += 1_000_000)
+			{
+				const fragmentBuffer = originalBuffer.slice(i, i + 1_000_000);
+				segments.push(fragmentBuffer);
+
+				if(isBufferHashCheck)
+				{
+					const fragmentBufferHash = Decimalian.fromString(createHash("sha256").update(new Uint8Array(fragmentBuffer)).digest("hex"), 16).toString();
+					console.log("scheduled to send buffer hash:", bufferHash, ", fragment buffer hash:", fragmentBufferHash, ", byteLength:", fragmentBuffer.byteLength);
+				}
+			}
+			const onClaimBuffer = ()=>
+			{
+				if(segments.length)
+				{
+					const segmentBuffer = segments.shift();
+					if(isBufferHashCheck)
+					{
+						const segmentBufferHash = Decimalian.fromString(createHash("sha256").update(new Uint8Array(segmentBuffer)).digest("hex"), 16).toString();
+						console.log("send buffer hash:", bufferHash, ", fragment buffer hash:", segmentBufferHash, ", byteLength:", segmentBuffer.byteLength);
+					}
+					toClientSocket.emit(eventName, segmentBuffer);
+				}
+				else
+				{
+					toClientSocket.off(eventName, onClaimBuffer);
+					toClientSocket.emit(eventName, "end");
+				}
+			}
+			const eventName = "c2s_"+bufferHash;
+			toClientSocket.on(eventName, onClaimBuffer);
+			onClaimBuffer();
+		});
+	});
+
+	const preProcessError = (report) =>
+	{
+		const isTaskTryAgain = taskError(report);
+		if(!isTaskTryAgain)
+		{
+			//todo: クライアントが正常に Worker を起動できなかった時にココの処理に来るが、その後にタスク依頼を再挑戦するかどうかとか、どうすればいいのかをちゃんと考える
+			console.log("ここに到達する事があったら、その後どう処理すればいいのか");
+		}
+	}
+
+	const processingError = (report) =>
+	{
+		const isTaskTryAgain = taskError(report);
+		if(!isTaskTryAgain)
+		{
+			/** @type {FromClientProcessing|any} */
+			const processing = clientProcessingPool[report.taskId];
+			processing.status = "error";
+			processing.reject(report.error);
+			if(processing.listenerCount("error") > 0) processing.emit("error", processing);
+			delete clientProcessingPool[report.taskId];
+		}
+	}
+
+	/**
+	 *
+	 * @param report
+	 * @return {boolean} タスク振り分けを再試行したかどうか
+	 */
 	const taskError = (report) =>
 	{
 		const taskId = report.taskId;
 		const request = RequestTask.getIncompleteTask(taskId);
 		request.statusUpdate();
+
+		if(logOptions.taskTraceLevel > 0)
+			console.log("タスクエラーを受信:", toClientSocket.ipAddress, RequestTask.getTaskNameFromTaskId(taskId), report);
+
 		// request.resolve({status: "error", error: report.error, request: request});
-		if(RagingSocketOptions.autoRequestTryAgain && request.autoRequestTryAgainCount++ > RagingSocketOptions.maxAutoRequestTryAgain)
+		toClientSocket.emit(SocketMessage.S2C_TASK_CANCEL, request.taskId);
+
+		if(RagingSocket.options.autoRequestTryAgain && request.autoRequestTryAgainCount++ > RagingSocket.options.maxAutoRequestTryAgain)
 		{
-			toClientSocket.emit(SocketMessage.S2C_TASK_CANCEL, request.taskId);
 			request.tryAgain();
+			return true;
 		}
-		else
-		{
-			const processing = clientProcessingPool[report.taskId];
-			processing.status = "error";
-			processing.error = report.error;
-			processing.reject(report.error);
-			processing.emit("error", processing);
-			delete clientProcessingPool[report.taskId];
-		}
+		return false;
 	}
 
-	toClientSocket.on(SocketMessage.C2S_TASK_PREPROCESS_ERROR, taskError);
-	toClientSocket.on(SocketMessage.C2S_TASK_PROCESSING_ERROR, taskError);
+	toClientSocket.on(SocketMessage.C2S_TASK_PREPROCESS_ERROR, preProcessError);
+	toClientSocket.on(SocketMessage.C2S_TASK_PROCESSING_ERROR, processingError);
 
 	toClientSocket.on(SocketMessage.C2S_TASK_PROCESSING, report =>
 	{
 		const request = RequestTask.getIncompleteTask(report.taskId);
 		request.statusUpdate();
+		/** @type {FromClientProcessing|any} */
 		const processing = clientProcessingPool[report.taskId];
+
+		if(logOptions.taskTraceLevel > 2)
+			console.log("クライアントから変数を受信:", toClientSocket.ipAddress, RequestTask.getTaskNameFromTaskId(report.taskId));
+
+		if(!processing)
+		{
+			//todo: ↓の行に来ないような設計にしないといけない！！！！
+			throw new Error("non exist processing. taskId: " + report.taskId + ", taskName: " + request.taskName);
+		}
 
 		processing.status = "processing";
 		processing.vars = report.vars;
 		processing.emit("processing", processing);
 	});
+
+	toClientSocket.emit(SocketMessage.S2C_CONNECT_SUCCESS);
+	toClientSocket.on(SocketMessage.C2S_CONNECT_SUCCESS, ()=>
+	{
+		console.log("クライアント", ipAddress, "との接続が完了しました");
+	});
+}
+
+const claimStatusFunc = ()=>
+{
+	const now = lastClaimStatusTime = Date.now();
+	isClaimStatusQueue = false;
+	for(const address in instances)
+	{
+		const toClientSocket = instances[address];
+		// console.log("toClientSocket.requests.length:", toClientSocket.requests.length);
+		if(toClientSocket.requests.length) continue;
+
+		if(toClientSocket.status.canClaimStatusReport)
+		{
+			toClientSocket.status.canClaimStatusReport = false;
+			toClientSocket.lastReportStatusTime = lastClaimStatusTime;
+			toClientSocket.emit(SocketMessage.S2C_CLAIM_STATUS);
+		}
+		else
+		{
+			const timeLag = now - toClientSocket.lastReportStatusTime;
+			if(timeLag > RagingSocket.options.offlineDetectionTimeLimit)
+			{
+				console.log("offlineDetection:", (now - toClientSocket.lastReportStatusTime));
+				//todo: このクライアントは起動していない物とみなすための処理をしなきゃ！！！！
+			}
+			else if(timeLag > RagingSocket.options.statusReportCooldownTime)
+			{
+				// console.log("reclaim:", (now - toClientSocket.lastReportStatusTime));
+				toClientSocket.status.canClaimStatusReport = false;
+				toClientSocket.lastReportStatusTime = lastClaimStatusTime;
+				toClientSocket.emit(SocketMessage.S2C_CLAIM_STATUS);
+			}
+		}
+	}
 }
 
 /** @type {Object.<FromClientProcessing>} */
@@ -413,37 +744,94 @@ const clientProcessingPool = {};
 
 class FromClientProcessing extends EventEmitter
 {
-	constructor(request) {
-		super();
-		this.vars = null;
-		this.result = null;
-		this.error = null;
-		this.request = request;
-		clientProcessingPool[request.taskId] = this;
-	}
+	/** @type {(value:any)=>void}  */
+	#resolve;
+
+	/** @type {(reason?:any)=>void} */
+	#reject;
+
+	/** @type {boolean} */
+	#isRejected;
+
+	/** @type {any|*} */
+	vars;
+
+	/** @type {any|*} */
+	result;
+
+	/** @type {Error} */
+	error;
+
+	/** @type {RequestTask} */
+	request;
+
+	/** @type {string|null} */
+	status;
 
 	/**
 	 *
-	 * @return {Promise<*|Error>}
+	 * @param {RequestTask} request
+	 * @param {(reason?:any)=>void} reject
+	 */
+	constructor(request, reject) {
+		super();
+		this.request = request;
+		this.#reject = reject;
+		clientProcessingPool[request.taskId] = this;
+	}
+
+	get taskName() { return this.request.taskName; }
+
+	get taskId() { return this.request.taskId; }
+
+	/**
+	 *
+	 * @return {Promise<FromClientProcessing>}
 	 */
 	complete()
 	{
 		const proc = this;
 		return new Promise((resolve, reject) =>
 		{
-			proc._resolve = resolve;
-			proc._reject = reject;
+			// ToClientResponse の事前処理で、resolve() が呼ばれた後、この complete() メソッドが呼ばれる前に ToClientResponse の reject() が呼び出されるが、resolve 後では reject が発動したいため、ここで既に reject が発生済みかどうかをチェックする必要がある
+			if(proc.#isRejected) return reject(proc);
+
+			const logOptions = RagingSocket.options.logOptions;
+			if(logOptions.taskTraceLevel > 0)
+				console.log("タスク完了を待機:", proc.request.socket.ipAddress, RequestTask.getTaskNameFromTaskId(proc.request.taskId));
+
+			proc.#resolve = resolve;
+			proc.#reject = reject;
 		});
 	}
 
 	resolve(result)
 	{
-		if(typeof this._resolve !== "undefined") this._resolve(result);
+		if(typeof this.#resolve !== "undefined")
+		{
+			this.result = result;
+			this.#resolve(this);
+		}
+
+		const logOptions = RagingSocket.options.logOptions;
+		if(logOptions.taskTraceLevel > 0)
+			console.log("タスク完了:", this.request.socket.ipAddress, RequestTask.getTaskNameFromTaskId(this.request.taskId));
 	}
 
 	reject(result)
 	{
-		if(typeof this._reject !== "undefined") this._reject(result);
+		this.#isRejected = true;
+		if(typeof this.#reject !== "undefined")
+		{
+			this.error = result;
+			this.#reject(this);
+		}
+
+		const logOptions = RagingSocket.options.logOptions;
+		if(logOptions.taskTraceLevel > 0)
+			console.log("タスク失敗:", this.request.socket.ipAddress, RequestTask.getTaskNameFromTaskId(this.request.taskId));
+
+		this.request.markComplete();
 	}
 }
 

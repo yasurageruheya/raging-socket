@@ -21,27 +21,30 @@ class ServerWork
 		ToClientSocket = require("./ToClientSocket")
 		RequestTask = require("./RequestTask");
 		RagingSocket = require("./RagingSocket");
-		packageManager = RagingSocket.manager;
+		packageManager = RagingSocket.packageManager;
 	}
 
 	/**
 	 *
 	 * @param {object} workerData
 	 * @param {string} processType
+	 * @param {string} taskName
 	 * @return {Promise<{status:TaskStatus, error:Error, result:any, vars:any}|any>}
 	 * @return {Promise<ToClientResponse>}
 	 */
-	static assign(workerData, processType)
+	static assign(workerData, processType, taskName)
 	{
 		return new Promise((resolve, reject) =>
 		{
-			RequestTask.queue(workerData, resolve, reject, processType);
-
-			if(!isAssigning)
+			RequestTask.queue(workerData, resolve, reject, processType, taskName).then(()=>
 			{
-				queueMicrotask(assign);
-				isAssigning = true;
-			}
+				if(!isAssigning)
+				{
+					ToClientSocket.claimStatus();
+					isAssigning = true;
+					queueMicrotask(assign);
+				}
+			});
 		});
 	}
 
@@ -64,165 +67,157 @@ class ServerWork
 const assign = ()=>
 {
 	const cpuWorkableClients = ToClientSocket.cpuWorkableClients;
+	// console.log("cpuWorkableClients:", Object.keys(cpuWorkableClients).length);
 	const gpuWorkableClients = ToClientSocket.gpuWorkableClients;
 	const cpuTaskQueues = RequestTask.cpuTaskQueues;
 	const gpuTaskQueues = RequestTask.gpuTaskQueues;
+	const bothTaskQueues = RequestTask.bothTaskQueues;
 	/** @type {Object.<ToClientSocket>} */
 	const taskDelegatedClients = {};
+	// console.log("=================");
+	// console.log("cpuTaskQueues : ", Object.keys(cpuTaskQueues).length, ", gpuTaskQueues", Object.keys(gpuTaskQueues).length);
 
-	if(Object.keys(gpuWorkableClients).length)
-	{
-		for(const sourcecodeHash in gpuTaskQueues)
-		{
-			const tasks = gpuTaskQueues[sourcecodeHash];
+	const logOptions = RagingSocket.options.logOptions;
 
-			const preferredClients = ToClientSocket.findClientsFromSourcecodeHash(sourcecodeHash, gpuWorkableClients);
+	quota(gpuWorkableClients, gpuTaskQueues, "gpu", taskDelegatedClients);
+	quota(gpuWorkableClients, bothTaskQueues, "gpu", taskDelegatedClients);
+	quota(cpuWorkableClients, cpuTaskQueues, "cpu", taskDelegatedClients);
+	quota(cpuWorkableClients, bothTaskQueues, "cpu", taskDelegatedClients);
 
-			for(const address in preferredClients)
-			{
-				const toClientSocket = preferredClients[address];
-				const clientStatus = toClientSocket.status;
-				const length = tasks.length < clientStatus.idleGpuLength ? tasks.length : clientStatus.idleGpuLength;
-				for(let i=0; i<length; i++)
-				{
-					const task = tasks.shift();
-					taskPackageHashSet(task, toClientSocket);
-					clientStatus.delegateTask(task);
-					taskDelegatedClients[address] = toClientSocket;
-				}
-				if(clientStatus.idleGpuLength <= 0) delete gpuWorkableClients[address];
-				if(!tasks.length) break;
-			}
-
-			if(!tasks.length) delete gpuTaskQueues[sourcecodeHash];
-			if(Object.keys(gpuWorkableClients).length <= 0) break;
-		}
-
-		if(Object.keys(gpuWorkableClients).length)
-		{
-			for(const sourcecodeHash in gpuTaskQueues)
-			{
-				const tasks = gpuTaskQueues[sourcecodeHash];
-
-				for(const address in gpuWorkableClients)
-				{
-					const toClientSocket = gpuWorkableClients[address];
-					const clientStatus = toClientSocket.status;
-					const length = tasks.length < clientStatus.idleGpuLength ? tasks.length : clientStatus.idleGpuLength;
-					for(let i=0; i<length; i++)
-					{
-						const task = tasks.shift();
-						taskPackageHashSet(task, toClientSocket);
-						clientStatus.delegateTask(task);
-					}
-					taskDelegatedClients[address] = toClientSocket;
-					if(clientStatus.idleGpuLength <= 0) delete gpuWorkableClients[address];
-					if(!tasks.length) break;
-				}
-
-				if(!tasks.length) delete gpuTaskQueues[sourcecodeHash];
-				if(Object.keys(gpuWorkableClients).length <= 0) break;
-			}
-		}
-	}
-
-
-
-
-	if(Object.keys(cpuWorkableClients).length)
-	{
-		for(const sourcecodeHash in cpuTaskQueues)
-		{
-			const tasks = cpuTaskQueues[sourcecodeHash];
-
-			const preferredClients = ToClientSocket.findClientsFromSourcecodeHash(sourcecodeHash, cpuWorkableClients);
-
-			for(const address in preferredClients)
-			{
-				const toClientSocket = preferredClients[address];
-				const clientStatus = toClientSocket.status;
-				const length = tasks.length < clientStatus.idleCpuLength ? tasks.length : clientStatus.idleCpuLength;
-				for(let i=0; i<length; i++)
-				{
-					const task = tasks.shift();
-					taskPackageHashSet(task, toClientSocket);
-					clientStatus.delegateTask(task);
-					taskDelegatedClients[address] = toClientSocket;
-				}
-				if(clientStatus.idleCpuLength <= 0) delete cpuWorkableClients[address];
-				if(!tasks.length) break;
-			}
-
-			if(!tasks.length) delete cpuTaskQueues[sourcecodeHash];
-			if(Object.keys(cpuWorkableClients).length <= 0) break;
-		}
-
-		if(Object.keys(cpuWorkableClients).length)
-		{
-			for(const sourcecodeHash in cpuTaskQueues)
-			{
-				const tasks = cpuTaskQueues[sourcecodeHash];
-
-				for(const address in cpuWorkableClients)
-				{
-					const toClientSocket = cpuWorkableClients[address];
-					const clientStatus = toClientSocket.status;
-					const length = tasks.length < clientStatus.idleCpuLength ? tasks.length : clientStatus.idleCpuLength;
-					for(let i=0; i<length; i++)
-					{
-						const task = tasks.shift();
-						taskPackageHashSet(task, toClientSocket);
-						clientStatus.delegateTask(task);
-					}
-					taskDelegatedClients[address] = toClientSocket;
-					if(clientStatus.idleCpuLength <= 0) delete cpuWorkableClients[address];
-					if(!tasks.length) break;
-				}
-
-				if(!tasks.length) delete cpuTaskQueues[sourcecodeHash];
-				if(Object.keys(cpuWorkableClients).length <= 0) break;
-			}
-		}
-	}
-
+	//todo: タスクが失敗した後に、そのタスクが完了しても未完了タスクから削除されない！！！！
 
 	for(const address in taskDelegatedClients)
 	{
 		const toClient = taskDelegatedClients[address];
-		const requests = toClient.requests.concat();
+		const requests = toClient.reserveRequests;
 		const length = requests.length;
+		const reserve = [];
+		// console.log("requests.length:", requests.length);
 		for(let i=0; i<length; i++)
 		{
-			const req = requests[i];
-			const promise = req.promise;
+			const request = requests[i];
+			const promise = request.promise;
 			if(promise.requiredPackages)
 			{
 				toClient.promises.push(promise.requiredPackages.then(requirePackages=>
 				{
-					req.promise.requiredPackages = null;
-					req.requiredPackages = requirePackages;
+					request.promise.requiredPackages = null;
+					request.requiredPackages = requirePackages;
 				}));
 			}
+			if(logOptions.taskTraceLevel > 1)
+				reserve.push(RequestTask.getTaskNameFromTaskId(request.taskId));
 		}
+		toClient.reserveRequests = [];
+
+		if(logOptions.taskTraceLevel > 2)
+			console.log("タスク要求準備:", toClient.ipAddress, reserve.join(" | "));
 
 		Promise.all(toClient.promises).then(()=>
 		{
 			const outbounds = [];
+			const requestTo = [];
 			for(let i=0; i<length; i++)
 			{
-				outbounds.push(requests[i].reserve());
+				const request = requests[i];
+				outbounds.push(request.reserve());
+
+				if(logOptions.taskTraceLevel > 1)
+					requestTo.push(RequestTask.getTaskNameFromTaskId(request.taskId));
 			}
 			toClient.emit(SocketMessage.S2C_REQUEST_TASKS, outbounds);
+
+			if(logOptions.taskTraceLevel > 1)
+				console.log("タスク要求:", toClient.ipAddress, requestTo.join(" | "));
 		});
-		toClient.requests.length = 0;
 	}
 
-	if(Object.keys(cpuTaskQueues).length || Object.keys(gpuTaskQueues).length)
+	// console.log("cpuTaskQueues : ", Object.keys(cpuTaskQueues).length, ", gpuTaskQueues", Object.keys(gpuTaskQueues).length);
+	if(Object.keys(cpuTaskQueues).length || Object.keys(gpuTaskQueues).length || Object.keys(bothTaskQueues).length)
+	{
+		ToClientSocket.claimStatus();
+	}
+	else if(RequestTask.hasIncompleteTasks)
 	{
 		ToClientSocket.claimStatus();
 	}
 
 	isAssigning = false;
+}
+
+/**
+ *
+ * @param {Object.<ToClientSocket>} workableClients
+ * @param {Object.<RequestTask[]>} taskQueues
+ * @param {"cpu"|"gpu"} processType
+ * @param {Object.<ToClientSocket>} taskDelegatedClients
+ */
+const quota = (workableClients, taskQueues, processType, taskDelegatedClients)=>
+{
+	const idleProcessingUnitName = "idle"+processType.charAt(0).toUpperCase()+"puLength";
+
+	if(Object.keys(workableClients).length)
+	{
+		for(const sourcecodeHash in taskQueues)
+		{
+			const tasks = taskQueues[sourcecodeHash];
+			const preferredClients = ToClientSocket.findClientsFromSourcecodeHash(sourcecodeHash, workableClients);
+
+			for(const address in preferredClients)
+			{
+				const toClientSocket = preferredClients[address];
+				const clientStatus = toClientSocket.status;
+				const idleProcessingUnitLength = clientStatus[idleProcessingUnitName];
+				const length = tasks.length < idleProcessingUnitLength ? tasks.length : idleProcessingUnitLength;
+				for(let i=0; i<length; i++)
+				{
+					const task = tasks.shift();
+					taskPackageHashSet(task, toClientSocket);
+					clientStatus.delegateTask(task, processType);
+				}
+				taskDelegatedClients[address] = toClientSocket;
+				if(clientStatus[idleProcessingUnitName] <= 0) delete workableClients[sourcecodeHash];
+				if(!tasks.length)
+				{
+					delete taskQueues[sourcecodeHash];
+					break;
+				}
+			}
+
+			if(Object.keys(workableClients).length <= 0) break;
+		}
+
+		if(Object.keys(workableClients).length)
+		{
+			for(const sourcecodeHash in taskQueues)
+			{
+				const tasks = taskQueues[sourcecodeHash];
+
+				for(const address in workableClients)
+				{
+					const toClientSocket = workableClients[address];
+					const clientStatus = toClientSocket.status;
+					const idleProcessingUnitLength = clientStatus[idleProcessingUnitName];
+					const length = tasks.length < idleProcessingUnitLength ? tasks.length : idleProcessingUnitLength;
+					for(let i=0; i<length; i++)
+					{
+						const task = tasks.shift();
+						taskPackageHashSet(task, toClientSocket);
+						clientStatus.delegateTask(task, processType);
+					}
+					taskDelegatedClients[address] = toClientSocket;
+					if(clientStatus[idleProcessingUnitName] <= 0) delete workableClients[address];
+					if(!tasks.length)
+					{
+						delete taskQueues[sourcecodeHash];
+						break;
+					}
+				}
+
+				if(Object.keys(workableClients).length <= 0) break;
+			}
+		}
+	}
 }
 
 /**

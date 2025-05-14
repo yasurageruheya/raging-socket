@@ -1,5 +1,5 @@
 const fs = require("fs");
-const pth = require("path");
+const path = require("path");
 
 const packageVersions = {};
 
@@ -7,9 +7,9 @@ class PackageVersion
 {
 	static lifespan = 10000;
 
-	constructor(path)
+	constructor(packageDirectoryPath)
 	{
-		this.path = pth.join(path, "package.json");
+		this.path = path.join(packageDirectoryPath, "package.json");
 		/** @type {string} */
 		this.version = "";
 		this.live = false;
@@ -47,11 +47,11 @@ class PackageVersion
 
 /**
  *
- * @param {string} path
+ * @param {string} packageDirectoryPath
  * @return {Promise<string>}
  */
-module.exports = (path)=>
+module.exports = (packageDirectoryPath)=>
 {
-	if(typeof packageVersions[path] === "undefined") packageVersions[path] = new PackageVersion(path);
-	return packageVersions[path].getVersion();
+	if(typeof packageVersions[packageDirectoryPath] === "undefined") packageVersions[packageDirectoryPath] = new PackageVersion(packageDirectoryPath);
+	return packageVersions[packageDirectoryPath].getVersion();
 }

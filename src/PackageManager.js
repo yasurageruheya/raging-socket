@@ -2,7 +2,6 @@ const {createHash} = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const semver = require("semver");
-const moduleRoot = path.join(__dirname, "../");
 const Pathurizer = require("pathurizer");
 const _root = process.cwd();
 const TextFile = require("text-file-cache");
@@ -11,52 +10,11 @@ const TreelikeMap = require("treelike-map");
 
 const __PROJECT_SCOPE_MODULE = "__psm";
 
-const rootCacheDir = path.join(_root, "raging-socket");
-if(!fs.existsSync(rootCacheDir))
-{
-	try {
-		fs.mkdirSync(rootCacheDir);
-	} catch (error) {
-		throw new Error("プロジェクトルートに RagingSocket のキャッシュフォルダー 「raging-socket」 フォルダーを作成できませんでした。\n"+
-						"フォルダの書き込み権限が関係している場合は、事前に「raging-socket」フォルダーを手動で作り、その中に\n"+
-						"「node_modules」「_packageCache」「_sourcecodeFromHash」の3つのフォルダーを手動で作っておいてから、\n"+
-						"再度サーバーを起動してください");
-	}
-}
+const Directory = require("./Directory");
+const rootCacheDir = Directory.rootCacheDir;
+const packageCacheDir = Directory.packageCacheDir;
+const sourcecodeFromHashDir = Directory.sourcecodeFromHashDir;
 
-const directoryMakeError = new Error("プロジェクトルートのキャッシュフォルダー 「raging-socket」 の中に「node_modules」フォルダーを作成できませんでした。\n"+
-	"フォルダの書き込み権限が関係している場合は、事前に「node_modules」「_packageCache」「_sourcecodeFromHash」の3つのフォルダーを手動で作っておいてから、\n"+
-	"再度サーバーを起動してください");
-
-const cache_node_modules = path.join(rootCacheDir, "node_modules");
-if(!fs.existsSync(cache_node_modules))
-{
-	try {
-		fs.mkdirSync(cache_node_modules);
-	} catch (error) {
-		throw directoryMakeError;
-	}
-}
-
-const packageCacheDir = path.join(rootCacheDir, "_packageCache");
-if(!fs.existsSync(packageCacheDir))
-{
-	try {
-		fs.mkdirSync(packageCacheDir);
-	} catch (error) {
-		throw directoryMakeError;
-	}
-}
-
-const sourcecodeFromHashDir = path.join(rootCacheDir, "_sourcecodeFromHash");
-if(!fs.existsSync(sourcecodeFromHashDir))
-{
-	try {
-		fs.mkdirSync(sourcecodeFromHashDir);
-	} catch (error) {
-		throw directoryMakeError;
-	}
-}
 
 
 /** @type {typeof RagingSocket} */
@@ -68,9 +26,6 @@ const JsonDataAccessor = require("./JsonDataAccessor");
 const getCacheFiles = require("./getCacheFiles");
 const getTimeLimitedCache = require("./getTimeLimitedCache");
 let myPackages;
-
-/** @type {Promise<object>} */
-const dotPackageLockJsonRead = new JsonDataAccessor(path.join(_root, "/.package-lock.json")).initialize;
 
 /**
  * @typedef dependency
@@ -115,10 +70,6 @@ const packagesFromPackageHash = new JsonDataAccessor(path.join(rootCacheDir, "pa
 {
 	packageHashFromPackages[value] = property;
 });
-packagesFromPackageHash.initialize.then(()=>
-{
-	swapKeysAndValues(packagesFromPackageHash.data, packageHashFromPackages);
-});
 
 /** @type {Object.<string>} */
 const sourcecodeHashFromModifiedSourcecodeHash = {};
@@ -145,7 +96,7 @@ const modifiedSourcecodeHashFromPath = getTimeLimitedCache(10000
 });
 
 /** @type {Object.<string>} */
-const packageHashFromModifiedSourcecodeHash = getTimeLimitedCache();
+const packageHashFromModifiedSourcecodeHash = {};
 
 /** @type {Object.<string>} */
 const modifiedSourcecodeHashesFromModifiedSourcecodeHash = getTimeLimitedCache();
@@ -169,14 +120,19 @@ const archiveOptionsVer2 = {};
 archiveOptionsVer2.sync = true;
 
 const extractOptions = {};
-extractOptions.cwd = cache_node_modules;
+extractOptions.cwd = Directory.rootCacheDir;
 extractOptions.onentry = entry =>
 {
-	entry.path = entry.path.replace("_AT_", "@");
-	if(entry.path.slice(-1) === "/")
+	/** @type {string} */
+	let p = entry.path;
+	p = p.replace("_AT_", "@");
+	if(p.includes("node_modules")) p = p.slice(entry.path.lastIndexOf("node_modules"));
+	if(p.includes("_sourcecodeFromHash")) p = p.slice(entry.path.lastIndexOf("_sourcecodeFromHash"));
+	if(p.slice(-1) === "/")
 	{
-		additionalModuleNames.push(entry.path.slice(0, -1));
+		additionalModuleNames.push(p.slice(0, -1));
 	}
+	entry.path = p;
 }
 
 // nodejs Core のパッケージ名をキャッシュしておくオブジェクト
@@ -201,6 +157,8 @@ const projectScopeModulePaths = [];
 
 class PackageManager
 {
+	get __PROJECT_SCOPE_MODULE() { return __PROJECT_SCOPE_MODULE; }
+
 	constructor()
 	{
 
@@ -210,42 +168,52 @@ class PackageManager
 	{
 		RagingSocket = require("./RagingSocket");
 		const promises = [];
-		promises.push(packagesFromPackageHash.initialize);
-		promises.push(packageHashFromModifiedSourcecodeHash.initialize);
+		promises.push();
+		// promises.push(packageHashFromModifiedSourcecodeHash.initialize);
 
 		promises.push(new Promise(resolve =>
 		{
-			dotPackageLockJsonRead.then(jsonProxy =>
+			Directory.initialize().then(()=>
 			{
-				myPackages = RagingSocket.myStatus.packages = jsonProxy;
-				return util.promisify(fs.readFile)(path.join(_root, "/package-lock.json"), "utf-8");
+				const promises = [];
+				promises.push(packagesFromPackageHash.initialize);
+				promises.push(packageHashFromModifiedSourcecodeHash.initialize);
+				return Promise.all(promises);
+			}).then(()=>
+			{
+				swapKeysAndValues(packagesFromPackageHash.data, packageHashFromPackages);
+				return new JsonDataAccessor(path.join(rootCacheDir, ".package-lock.json")).initialize;
 
 			}).catch(error =>
 			{
-				throw new Error("package-lock.json が " + _root + " に見つかりませんでした");
+				throw new Error("package-lock.json が " + _root + " に見つかりませんでした。"+error.message);
+			}).then((jsonProxy)=>
+			{
+				myPackages = RagingSocket.myStatus.packages = jsonProxy;
+				return util.promisify(fs.readFile)(path.join(_root, "package-lock.json"), "utf-8");
 
-			}).then(packageLockJsonText =>
+			}).then((packageLockJsonText)=>
 			{
 				const packages = {};
-				if(typeof packageLockJsonText !== "undefined")
+				if (typeof packageLockJsonText !== "undefined")
 				{
 					const packageLockJsonObj = JSON.parse(packageLockJsonText.toString());
-					if(typeof packageLockJsonObj.dependencies !== "undefined")
+					if (typeof packageLockJsonObj.dependencies !== "undefined")
 					{
 						const dependencies = packageLockJsonObj.dependencies;
-						for(const key in dependencies)
+						for (const key in dependencies)
 						{
-							if(!key.includes("@types/"))
+							if (!key.includes("@types/"))
 							{
 								const pkg = packages[key] = {};
 								const dep = dependencies[key];
 								pkg.version = dep.version;
 								pkg.requires = {};
-								if(typeof dep.requires !== "undefined")
+								if (typeof dep.requires !== "undefined")
 								{
-									for(const i in dependencies[key]["requires"])
+									for (const i in dependencies[key]["requires"])
 									{
-										if(!dep.requires[i].includes("@types/"))
+										if (!dep.requires[i].includes("@types/"))
 										{
 											pkg.requires[i] = dep.requires[i];
 										}
@@ -255,39 +223,58 @@ class PackageManager
 						}
 						packages.version = 1;
 					}
-					else if(typeof packageLockJsonObj.packages !== "undefined")
+					else if (typeof packageLockJsonObj.packages !== "undefined")
 					{
-						//todo: 新バージョンの package-lock.json用の処理
 						const dependencies = packageLockJsonObj.packages;
 						const node_modules = "node_modules/"
-						for(const key in dependencies)
+						for (const key in dependencies)
 						{
 							const moduleName = key.slice(key.lastIndexOf(node_modules) + node_modules.length);
-							if(typeof packages[moduleName] === "undefined") packages[moduleName] = {};
+							if (typeof packages[moduleName] === "undefined") packages[moduleName] = {};
 							const pkg = packages[moduleName];
 							const mod = dependencies[key];
-							if(typeof pkg[mod.version] === "undefined")
+							if (typeof pkg[mod.version] === "undefined")
 							{
 								pkg[mod.version] = {};
 								const obj = pkg[mod.version];
 								obj.src = key;
 								obj.version = mod.version;
-								if(mod.dependencies) obj.dependencies = mod.dependencies;
-								if(mod.devDependencies) obj.devDependencies = mod.devDependencies;
-								if(mod.optionalDependencies) obj.optionalDependencies = mod.optionalDependencies;
-								if(mod.peerDependencies) obj.peerDependencies = mod.peerDependencies;
-								if(mod.bin) obj.bin = mod.bin;
+								if (mod.dependencies) obj.dependencies = mod.dependencies;
+								if (mod.devDependencies) obj.devDependencies = mod.devDependencies;
+								if (mod.optionalDependencies) obj.optionalDependencies = mod.optionalDependencies;
+								if (mod.peerDependencies) obj.peerDependencies = mod.peerDependencies;
+								if (mod.bin) obj.bin = mod.bin;
 							}
 						}
 						packages.version = 2;
 					}
 
-					for(const key in packages)
+					for (const key in packages)
 					{
-						if(key) myPackages[key] = packages[key];
+						if (key) myPackages[key] = packages[key];
 					}
 				}
 
+				return new Promise(resolve =>
+				{
+					myPackages[__PROJECT_SCOPE_MODULE] = {};
+					fs.readdir(sourcecodeFromHashDir, {withFileTypes: true}, (error, directoryEntries) =>
+					{
+						if(error) throw error;
+						const length = directoryEntries.length;
+						for(let i = 0; i < length; i++)
+						{
+							const entry = directoryEntries[i];
+							if(entry.isFile())
+							{
+								myPackages[__PROJECT_SCOPE_MODULE][entry.name] = 1;
+							}
+						}
+						resolve();
+					});
+				});
+			}).then(()=>
+			{
 				return packageJsonRead;
 			}).then(packageJsonText =>
 			{
@@ -313,7 +300,6 @@ class PackageManager
 			if(projectScopeRootPath)
 			{
 				let pending = 0;
-				const projectScopeRootPathLength = projectScopeRootPath.length + 1;
 				const readdir = (dirPath, obj)=>
 				{
 					pending++;
@@ -345,16 +331,15 @@ class PackageManager
 									projectScopeModulePaths.push(targetPath);
 								}
 
-								if(!--pending)
-									resolve();
+								if(!--pending) resolve();
 							});
 						}
-					})
+					});
 				}
 
 				readdir(projectScopeRootPath, projectScopeDirectoryStructure);
 			}
-		}))
+		}));
 
 		return Promise.all(promises);
 	}
@@ -374,6 +359,11 @@ class PackageManager
 		return getModifiedSourcecodeFromJsPath(jsPath);
 	}
 
+	setSourcecodeFromSourcecodeHash(sourcecodeHash, sourcecode)
+	{
+		sourcecodeFromSourcecodeHash[sourcecodeHash] = sourcecode;
+	}
+
 
 	getModifiedSourcecodeHashesFromJsPath(jsPath)
 	{
@@ -383,11 +373,12 @@ class PackageManager
 	/**
 	 *
 	 * @param {object} packages
+	 * @param {string} packageHash
 	 * @return {Promise<Buffer>}
 	 */
-	getPackageBufferFromPackages(packages)
+	getPackageBufferFromPackages(packages, packageHash)
 	{
-		return getPackageBufferFromPackages(packages);
+		return getPackageBufferFromPackages(packages, packageHash);
 	}
 
 	/**
@@ -482,6 +473,23 @@ class PackageManager
 
 	/**
 	 *
+	 * @param {Object.<dependency>} packages
+	 * @return {string|null}
+	 */
+	getShortfallPackageHashFromPackages(packages)
+	{
+		const shortfallPackages = compareRequiredPackages(packages);
+		// if(!shortfallPackages[packageManager.__PROJECT_SCOPE_MODULE].length) delete shortfallPackages[packageManager.__PROJECT_SCOPE_MODULE];
+		if(Object.keys(shortfallPackages).length)
+		{
+			shortfallPackages.version = myPackages.version;
+			return getPackageHashFromPackages(shortfallPackages);
+		}
+		else return null;
+	}
+
+	/**
+	 *
 	 * @param {Object.<dependency>} requiredPackages
 	 * @return {Object.<dependency>}
 	 */
@@ -492,26 +500,7 @@ class PackageManager
 
 	setPackageBuffer(packageHash, tarGzBuffer)
 	{
-		packageTarGzBufferCache[packageHash] = tarGzBuffer;
-		return new Promise(resolve =>
-		{
-			zlib.gunzip(tarGzBuffer, (error, buffer)=>
-			{
-				if(error) throw error;
-
-				const extractor = tar.extract(extractOptions);
-				extractor.on("error", error =>
-				{
-					console.error(error);
-				})
-				extractor.on("end", ()=>
-				{
-					resolve();
-				});
-
-				extractor.end(buffer);
-			})
-		})
+		return setPackageBuffer(packageHash, tarGzBuffer);
 	}
 }
 
@@ -539,6 +528,42 @@ const getTreelikeMap = (...args)=>
 		}
 	}
 	return {map:promiseObj, already: already};
+}
+
+const setPackageBuffer = (packageHash, tarGzBuffer)=>
+{
+	const response = getTreelikeMap(setPackageBuffer, packageHash);
+	if(!response.already)
+	{
+		response.map.value = new Promise(resolve =>
+		{
+			packageTarGzBufferCache[packageHash] = tarGzBuffer;
+			const packages = getPackagesFromPackageHash(packageHash);
+			for(const key in packages)
+			{
+				myPackages[key] = packages[key];
+			}
+
+			zlib.gunzip(tarGzBuffer, (error, buffer)=>
+			{
+				if(error) throw error;
+
+				const extractor = tar.extract(extractOptions);
+				extractor.on("error", error =>
+				{
+					console.error(error);
+				});
+				extractor.on("end", ()=>
+				{
+					resolve();
+					response.map.parent.remove(packageHash, true);
+				});
+
+				extractor.end(buffer);
+			})
+		})
+	}
+	return response.map.value;
 }
 
 const getPackagesFromJsPath = (jsPath)=>
@@ -570,12 +595,12 @@ const getModifiedSourcecodeFromJsPath = (jsPath)=>
 		{
 			TextFile.getTextFile(jsPath).content.then(sourcecode=>
 			{
-				return getModifiedSourcecodeFromSourcecode(sourcecode);
+				return getModifiedSourcecodeFromSourcecode(sourcecode, [], jsPath);
 
 			}).then(modifiedSourcecode =>
 			{
 				resolve(modifiedSourcecode);
-				response.map.parent.remove(jsPath, true);
+				response.map.parent.remove(jsPath);
 			});
 		});
 	}
@@ -593,6 +618,10 @@ const getModifiedSourcecodeHashFromJsPath = (jsPath)=>
 	const response = getTreelikeMap(getModifiedSourcecodeHashFromJsPath, jsPath);
 	if(!response.already)
 	{
+		const logOptions = RagingSocket.options.logOptions;
+		if(logOptions.taskTraceLevel > 2)
+			console.log("js 解析開始:", jsPath);
+
 		response.map.value = new Promise(resolve =>
 		{
 			TextFile.getTextFile(jsPath).content.then(sourcecode =>
@@ -619,7 +648,7 @@ const getModifiedSourcecodeHashFromJsPath = (jsPath)=>
 const getModifiedSourcecodeHashFromSourcecode = (sourcecode, history, jsPath="")=>
 {
 	const isLooped = history.includes(getModifiedSourcecodeHashFromSourcecode);
-	const response = getTreelikeMap(getModifiedSourcecodeHashFromSourcecode, isLooped, sourcecode);
+	const response = getTreelikeMap(getModifiedSourcecodeHashFromSourcecode, sourcecode, isLooped);
 	history.push(getModifiedSourcecodeHashFromSourcecode);
 	if(!response.already)
 	{
@@ -629,15 +658,15 @@ const getModifiedSourcecodeHashFromSourcecode = (sourcecode, history, jsPath="")
 			const modifiedSourcecodeHash = getModifiedSourcecodeHashFromSourcecodeHash(sourcecodeHash);
 			if(modifiedSourcecodeHash)
 			{
-				removeResponse(response, sourcecode, isLooped);
+				removeResponse(response, isLooped, sourcecode);
 				return resolve(modifiedSourcecodeHash);
 			}
 
 			getModifiedSourcecodeFromSourcecode(sourcecode, history, jsPath).then(modifiedSourcecode=>
 			{
 				const modifiedSourcecodeHash = getSourcecodeHashFromSourcecode(modifiedSourcecode);
-				modifiedSourcecodeHashFromSourcecodeHash[sourcecodeHash] = modifiedSourcecode;
-				removeResponse(response, sourcecode, isLooped);
+				modifiedSourcecodeHashFromSourcecodeHash[sourcecodeHash] = modifiedSourcecodeHash;
+				removeResponse(response, isLooped, sourcecode);
 				resolve(modifiedSourcecodeHash);
 			});
 		});
@@ -780,9 +809,27 @@ const compareRequiredPackages = (requiredPackages)=>
 		{
 			shortfallPackages[packageName] = pkg;
 		}
-		else if(pkg.version !== myPackages[packageName].version)
+		else if(packageName === __PROJECT_SCOPE_MODULE)
 		{
-			shortfallPackages[packageName] = pkg;
+			const myPsm = myPackages[__PROJECT_SCOPE_MODULE];
+			const length = pkg.length;
+			shortfallPackages[packageName] = [];
+			for(let i=0; i<length; i++)
+			{
+				if(!myPsm[pkg[i]]) shortfallPackages[packageName].push(pkg[i]);
+			}
+			if(!shortfallPackages[packageName].length) delete shortfallPackages[packageName];
+		}
+		else
+		{
+			for(const version in pkg)
+			{
+				if(typeof myPackages[packageName][version] === "undefined")
+				{
+					shortfallPackages[packageName] = pkg;
+					break;
+				}
+			}
 		}
 	}
 	return shortfallPackages;
@@ -790,21 +837,23 @@ const compareRequiredPackages = (requiredPackages)=>
 
 /**
  *
- * @param {TreelikeMap} response
- * @param {any} key
- * @param {any} parentKey
+ * @param {{already:boolean, map:TreelikeMap}} response
+ * @param {any} keys
  */
-const removeResponse = (response, key, parentKey)=>
+const removeResponse = (response, ...keys)=>
 {
-	if(typeof parentKey !== "undefined")
+	const length = keys.length;
+	// ancestor は "祖先" や "先祖"
+	const ancestors = [];
+	let map = response.map;
+	for(let i=0; i<length; i++)
 	{
-		const grandparent = response.map.parent.parent;
-		response.map.parent.remove(key);
-		if(grandparent.size === 1) grandparent.remove(parentKey, true);
+		ancestors.push(map.parent);
+		map = map.parent;
 	}
-	else
+	for(let i=0; i<length; i++)
 	{
-		response.map.parent.remove(key);
+		if(ancestors[i].size === 1) ancestors[i].remove(keys[i]);
 	}
 }
 
@@ -819,14 +868,14 @@ const getPackageHashFromSourcecode = (sourcecode, jsPath="") =>
 	const response = getTreelikeMap(getPackageHashFromSourcecode, sourcecode, jsPath);
 	if(!response.already)
 	{
-		response.map.value = new Promise((resolve, reject) =>
+		response.map.value = new Promise((resolve) =>
 		{
 			getModifiedSourcecodeHashFromSourcecode(sourcecode, [], jsPath).then(modifiedSourcecodeHash=>
 			{
 				const packageHash = getPackageHashFromModifiedSourcecodeHash(modifiedSourcecodeHash);
 				if(packageHash)
 				{
-					removeResponse(jsPath, sourcecode);
+					removeResponse(response, jsPath, sourcecode);
 					return resolve(packageHash);
 				}
 
@@ -840,7 +889,7 @@ const getPackageHashFromSourcecode = (sourcecode, jsPath="") =>
 				{
 					const packageHash = getPackageHashFromPackages(packages);
 					resolve(packageHash);
-					removeResponse(jsPath, sourcecode);
+					removeResponse(response, jsPath, sourcecode);
 				});
 			});
 		});
@@ -856,12 +905,13 @@ const getPackageHashFromSourcecode = (sourcecode, jsPath="") =>
  */
 const getModifiedSourcecodeFromSourcecodeHash = (sourcecodeHash)=>
 {
-	const response = getTreelikeMap(sourcecodeHash);
+	const response = getTreelikeMap(getModifiedSourcecodeFromSourcecodeHash, sourcecodeHash);
 	if(!response.already)
 	{
 		response.map.value = new Promise(resolve=>
 		{
 			const modifiedSourcecodeHash = getModifiedSourcecodeHashFromSourcecodeHash(sourcecodeHash);
+			//todo: プロジェクトスコープのモジュールの参照がなく、ソースコードを書き換える必要が無い場合は、modifiedSourcecodeHash と sourcecodeHash が同じ物になるが、そうなった時の判定とかをまったくしていないが、なんかするべきではないか
 			if(modifiedSourcecodeHash)
 			{
 				getSourcecodeFromSourcecodeHash(modifiedSourcecodeHash).then(modifiedSourcecode=>
@@ -889,7 +939,7 @@ const getModifiedSourcecodeFromSourcecodeHash = (sourcecodeHash)=>
 const getModifiedSourcecodeFromSourcecode = (sourcecode, history, jsPath="")=>
 {
 	const isLooped = history.includes(getModifiedSourcecodeFromSourcecode);
-	const response = getTreelikeMap(getModifiedSourcecodeFromSourcecode, isLooped, sourcecode, jsPath);
+	const response = getTreelikeMap(getModifiedSourcecodeFromSourcecode, sourcecode, jsPath, isLooped);
 	history.push(getModifiedSourcecodeFromSourcecode);
 	if(!response.already)
 	{
@@ -902,15 +952,19 @@ const getModifiedSourcecodeFromSourcecode = (sourcecode, history, jsPath="")=>
 				{
 					extractPackagesFromSourcecode(sourcecode, jsPath).then(result=>
 					{
-						const modifiedSourcecode = result.sourcecode;
+						modifiedSourcecode = result.sourcecode;
+						return onExtractedPackagesFromSourcecode(result);
+					}).then(packages=>
+					{
 						resolve(modifiedSourcecode);
-						removeResponse(response, jsPath, sourcecode, isLooped);
-					})
+						//todo: 引数から来た packages ってなんかに使うべきか！？
+						removeResponse(response, isLooped, jsPath, sourcecode);
+					});
 				}
 				else
 				{
 					resolve(modifiedSourcecode);
-					removeResponse(response, jsPath, sourcecode, isLooped);
+					removeResponse(response, isLooped, jsPath, sourcecode);
 				}
 			})
 		})
@@ -938,7 +992,7 @@ const getPackagesFromModifiedSourcecode = (modifiedSourcecode, jsPath="")=>
 				const packages = getPackagesFromPackageHash(packageHash);
 				if(packages)
 				{
-					removeResponse(jsPath, sourcecode);
+					removeResponse(response, jsPath, modifiedSourcecode);
 					return resolve(packages);
 				}
 			}
@@ -949,7 +1003,7 @@ const getPackagesFromModifiedSourcecode = (modifiedSourcecode, jsPath="")=>
 
 			}).then(packages =>
 			{
-				removeResponse(jsPath, sourcecode);
+				removeResponse(response, jsPath, modifiedSourcecode);
 
 				// ▼ extractPackagesFromSourcecode() で package キャッシュを作っているので、ここでキャッシュを作らなくても大丈夫
 				// packagesFromPackageHash.data[getPackageHashFromPackages(packages)] = JSON.stringify(packages);
@@ -974,7 +1028,7 @@ const getModifiedSourcecodeHashFromModifiedSourcecode = (modifiedSourcecode)=>
 const getPackagesFromSourcecode = (sourcecode, history, jsPath="")=>
 {
 	const isLooped = history.includes(getPackagesFromSourcecode);
-	const response = getTreelikeMap(getPackagesFromSourcecode, isLooped, jsPath);
+	const response = getTreelikeMap(getPackagesFromSourcecode, sourcecode, isLooped, jsPath);
 	history.push(getPackagesFromSourcecode);
 	if(!response.already)
 	{
@@ -1000,19 +1054,19 @@ const getPackagesFromSourcecode = (sourcecode, history, jsPath="")=>
 			{
 				if(!packages)
 				{
-					extractPackagesFromSourcecode(sourcecode).then(result =>
+					extractPackagesFromSourcecode(sourcecode, jsPath).then(result =>
 					{
 						return onExtractedPackagesFromSourcecode(result);
 					}).then(packages=>
 					{
 						resolve(packages);
-						removeResponse(jsPath, isLooped);
+						removeResponse(response, jsPath, isLooped, sourcecode);
 					});
 				}
 				else
 				{
 					resolve(packages);
-					removeResponse(jsPath, isLooped);
+					removeResponse(response, jsPath, isLooped, sourcecode);
 				}
 			});
 		});
@@ -1078,8 +1132,12 @@ const extractPackagesFromSourcecode = (sourcecode, jsPath="")=>
 	{
 		response.map.value = new Promise((resolve)=>
 		{
-			const packageNames = sourcecode.match(/require\(['"]([^'"]+)['"]\)/g)
-				.map(match => match.match(/require\(['"]([^'"]+)['"]\)/)[1]);
+			const packageNames = (()=>
+			{
+				const requires = sourcecode.match(/require\(['"]([^'"]+)['"]\)/g);
+				if(requires) return requires.map(match => match.match(/require\(['"]([^'"]+)['"]\)/)[1]);
+				else return [];
+			})();
 
 			const packages = {};
 			packages.version = myPackages.version;
@@ -1113,8 +1171,13 @@ const extractPackagesFromSourcecode = (sourcecode, jsPath="")=>
 								sourcecode = sourcecode.split(result.value.packageName).join("./"+result.value.modifiedSourcecodeHash);
 						}
 					}
-					if(reasons.length) throw new Error(reasons.join(", "));
-					else resolve({packages, sourcecode});
+					if(reasons.length)
+						throw new Error(reasons.join(", "));
+					else
+					{
+						if(!packages[__PROJECT_SCOPE_MODULE].length) delete packages[__PROJECT_SCOPE_MODULE];
+						resolve({packages, sourcecode});
+					}
 
 					removeResponse(response, jsPath, sourcecode);
 				});
@@ -1203,7 +1266,7 @@ const extractPackageVer2 = (packages, packageName, jsPath="")=>
 
 				getSubModule(packages, mod);
 				resolve();
-				removeResponse(jsPath, packageName);
+				removeResponse(response, jsPath, packageName);
 			}
 			else
 			{
@@ -1211,7 +1274,7 @@ const extractPackageVer2 = (packages, packageName, jsPath="")=>
 				{
 					const modulePath = (()=>
 					{
-						if(jsPath) return path.join(jsPath, packageName);
+						if(jsPath) return path.join(path.join(jsPath, "../"), packageName + ".js");
 						else
 						{
 							const psmPath = getProjectScopeModulePath(packageName);
@@ -1222,17 +1285,21 @@ const extractPackageVer2 = (packages, packageName, jsPath="")=>
 
 					TextFile.getTextFile(modulePath).content.then(moduleSourcecode=>
 					{
-						const newPath = modulePath.join("../");
-						return getModifiedSourcecodeHashFromSourcecode(moduleSourcecode, [], newPath);
+						return getModifiedSourcecodeHashFromSourcecode(moduleSourcecode, [], modulePath);
 
 					}).then(modifiedSourcecodeHash=>
 					{
+						const requiredPackages = JSON.parse(getPackagesFromModifiedSourcecodeHash(modifiedSourcecodeHash));
+						if(requiredPackages[__PROJECT_SCOPE_MODULE])
+							packages[__PROJECT_SCOPE_MODULE].push(...requiredPackages[__PROJECT_SCOPE_MODULE]);
+
 						packages[__PROJECT_SCOPE_MODULE].push(modifiedSourcecodeHash);
+						myPackages[__PROJECT_SCOPE_MODULE][modifiedSourcecodeHash] = 1;
 						resolve({packageName, modifiedSourcecodeHash});
-						removeResponse(jsPath, packageName);
+						removeResponse(response, jsPath, packageName);
 					}).catch(error=>
 					{
-						removeResponse(jsPath, packageName);
+						removeResponse(response, jsPath, packageName);
 						throw error;
 					});
 				}
@@ -1242,8 +1309,9 @@ const extractPackageVer2 = (packages, packageName, jsPath="")=>
 					getModifiedSourcecodeHashFromJsPath(modulePath).then((modifiedSourcecodeHash)=>
 					{
 						packages[__PROJECT_SCOPE_MODULE].push(modifiedSourcecodeHash);
+						myPackages[__PROJECT_SCOPE_MODULE][modifiedSourcecodeHash] = 1;
 						resolve({packageName, modifiedSourcecodeHash});
-						removeResponse(jsPath, packageName);
+						removeResponse(response, jsPath, packageName);
 					})
 				}
 				else if(typeof corePackages[packageName] === "undefined")
@@ -1252,12 +1320,12 @@ const extractPackageVer2 = (packages, packageName, jsPath="")=>
 					{
 						corePackages[packageName] = 1;
 						resolve();
-						removeResponse(jsPath, packageName);
+						removeResponse(response, jsPath, packageName);
 					}
 					else
 					{
 						reject("サーバー側にあるパッケージから必要なパッケージを検索してみましたが、"+packageName+" というパッケージが見つからないみたいです");
-						removeResponse(jsPath, packageName);
+						removeResponse(response, jsPath, packageName);
 					}
 				}
 			}
@@ -1384,7 +1452,7 @@ const extractPackageVer2_2 = (packages, versionRange, packageName) =>
 const getPackagesFromPackageHash = (packageHash)=>
 {
 	if(typeof packagesFromPackageHash.data[packageHash] !== "undefined")
-		return packagesFromPackageHash.data[packageHash];
+		return JSON.parse(packagesFromPackageHash.data[packageHash]);
 	else return null;
 }
 
@@ -1408,7 +1476,7 @@ const getPackageBufferFromSourcecode = (sourcecode, jsPath="")=>
 			{
 				resolve(buffer);
 
-				removeResponse(jsPath, sourcecode);
+				removeResponse(response, jsPath, sourcecode);
 			});
 		})
 	}
@@ -1418,46 +1486,36 @@ const getPackageBufferFromSourcecode = (sourcecode, jsPath="")=>
 /**
  *
  * @param {Object.<dependency>} packages
+ * @param {string} packageHash
  * @return {Promise<Buffer>}
  */
-const getPackageBufferFromPackages = (packages)=>
+const getPackageBufferFromPackages = (packages, packageHash)=>
 {
 	const hash = getPackageHashFromPackages(packages);
+	if(hash !== packageHash)
+		throw new Error("クライアントから送られてきた packageHash と パッケージ文字列から作った packageHash が一致しません");
+	
 	const response = getTreelikeMap(getPackageBufferFromPackages, hash);
 	if(!response.already)
 	{
 		response.map.value = new Promise(resolve =>
 		{
 			const output = new WriteStream();
-			const pkg = JSON.parse(JSON.stringify(packages));
+			const pkg = typeof packages === "string" ? JSON.parse(packages) : packages;
 			const psm = pkg[__PROJECT_SCOPE_MODULE];
 			delete pkg[__PROJECT_SCOPE_MODULE];
 			if(pkg.version === 1)
 			{
 				scopedPackageCheckFromDirectoryNames(Object.keys(pkg)).then(directories=>
 				{
-					for(const sourcecodeHash in psm)
+					for(const sourcecodeHash of psm)
 					{
 						directories.push(path.join(sourcecodeFromHashDir, sourcecodeHash));
 					}
-					const archived = tar.c(archiveOptions, directories);
 
-					output.once("finish", ()=>
-					{
-						zlib.gzip(Buffer.concat(output.buffers), (error, gzip)=>
-						{
-							output.delete();
-							if(error) throw error;
-							packageTarGzBufferCache[hash] = gzip;
-							const filePath = path.join(packageCacheDir, hash + ".tar.gz");
-							fs.writeFile(filePath, gzip, (error)=>
-							{
-								if(error) throw error;
-							});
-							resolve(gzip);
-							response.map.parent.remove(hash, true);
-						});
-					});
+					gzCompress(output, hash, response, resolve);
+
+					const archived = tar.c(archiveOptions, directories);
 					archived.pipe(output);
 				});
 			}
@@ -1465,29 +1523,25 @@ const getPackageBufferFromPackages = (packages)=>
 			{
 				scopedPackageCheckFromDirectoryNamesVer2(pkg).then(directories =>
 				{
-					for(const sourcecodeHash in psm)
+					if(psm)
 					{
-						directories.push(path.join(sourcecodeFromHashDir, sourcecodeHash));
-					}
-					const archived = tar.c(archiveOptionsVer2, directories);
-
-					output.once("finish", ()=>
-					{
-						zlib.gzip(Buffer.concat(output.buffers), (error, gzip)=>
+						for(const sourcecodeHash of psm)
 						{
-							output.delete();
-							if(error) throw error;
-							packageTarGzBufferCache[hash] = gzip;
-							const filePath = path.join(packageCacheDir, hash + ".tar.gz");
-							fs.writeFile(filePath, gzip, (error)=>
-							{
-								if(error) throw error;
-							});
-							resolve(gzip);
-							response.map.parent.remove(hash, true);
-						});
-					});
-					archived.pipe(output);
+							directories.push(path.join(sourcecodeFromHashDir, sourcecodeHash));
+						}
+					}
+
+					gzCompress(output, hash, response, resolve);
+
+					try
+					{
+						const archived = tar.c(archiveOptionsVer2, directories);
+						archived.pipe(output);
+					}
+					catch (error)
+					{
+						console.log(error);
+					}
 				});
 			}
 			else
@@ -1612,8 +1666,8 @@ const scopedPackageCheckFromDirectoryNamesVer2 = (packages)=>
 					processing++;
 					const mod = versions[version];
 					const replaced = mod.src.replace("@", "_AT_");
-					const orgPath = path.join(node_modules, mod.src);
-					const replacedPath = path.join(node_modules, replaced);
+					const orgPath = path.join(_root, mod.src);
+					const replacedPath = path.join(_root, replaced);
 					directories.push(replacedPath);
 					fs.stat(replacedPath, (error) =>
 					{
@@ -1641,8 +1695,9 @@ const scopedPackageCheckFromDirectoryNamesVer2 = (packages)=>
 						}
 						else
 						{
-							fsEx.copy(orgPath, replacedPath, ()=>
+							fsEx.copy(orgPath, replacedPath, (error)=>
 							{
+								if(error) directories.splice(directories.indexOf(replacedPath), 1);
 								if(!--processing) end(directories);
 							});
 						}
@@ -1663,6 +1718,26 @@ const scopedPackageCheckFromDirectoryNamesVer2 = (packages)=>
 		});
 	}
 	return response.map.value;
+}
+
+const gzCompress = (output, hash, response, resolve)=>
+{
+	output.once("finish", ()=>
+	{
+		zlib.gzip(Buffer.concat(output.buffers), (error, gzip)=>
+		{
+			output.delete();
+			if(error) throw error;
+			packageTarGzBufferCache[hash] = gzip;
+			const filePath = path.join(packageCacheDir, hash + ".tar.gz");
+			fs.writeFile(filePath, gzip, (error)=>
+			{
+				if(error) throw error;
+			});
+			resolve(gzip);
+			response.map.parent.remove(hash, true);
+		});
+	});
 }
 
 module.exports = PackageManager;

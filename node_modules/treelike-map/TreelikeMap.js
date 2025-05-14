@@ -2,8 +2,8 @@ class TreelikeMap
 {
 	/**
 	 *
-	 * @param [value] {any}
-	 * @param [parent] {TreelikeMap}
+	 * @param {any} [value]
+	 * @param {TreelikeMap} [parent]
 	 */
 	constructor(value="", parent)
 	{
@@ -17,22 +17,22 @@ class TreelikeMap
 
 	/**
 	 *
-	 * @param key {any}
+	 * @param {any} key
 	 * @return {boolean}
 	 */
 	has(key) { return this.children.has(key); }
 
 	/**
 	 *
-	 * @param key {any}
+	 * @param {any} key
 	 * @return {TreelikeMap}
 	 */
 	get(key) { return this.children.get(key); }
 
 	/**
 	 *
-	 * @param key {any}
-	 * @param [value] {any}
+	 * @param {any} key
+	 * @param {any} [value]
 	 * @return {TreelikeMap}
 	 */
 	set(key, value)
@@ -43,8 +43,14 @@ class TreelikeMap
 
 	/**
 	 *
-	 * @param key {any}
-	 * @param [all=false] {boolean}
+	 * @return {IterableIterator<TreelikeMap>}
+	 */
+	keys() { return this.children.keys(); }
+
+	/**
+	 *
+	 * @param {any} key
+	 * @param {boolean} [all=false]
 	 * @return {boolean}
 	 */
 	remove(key, all=false)

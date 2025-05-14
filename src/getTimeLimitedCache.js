@@ -8,7 +8,7 @@
 module.exports = (ttl=10000, onKeySet=null, onKeyRemove=null)=>
 {
 	const target = {};
-	/** @type {Object.<NodeJS.Timeout|null>} */
+	/** @type {Object.<NodeJS.Timeout|number>} */
 	const propKiller = {};
 
 	const handler = {};
@@ -16,12 +16,17 @@ module.exports = (ttl=10000, onKeySet=null, onKeyRemove=null)=>
 	{
 		target[key] = value;
 		if(typeof propKiller[key] !== "undefined") clearTimeout(propKiller[key]);
-		propKiller[key] = setTimeout(()=>
+		if(ttl)
 		{
-			onKeyRemove(key, value);
-			propKiller[key] = null;
-			delete propKiller[key];
-		}, ttl);
+			propKiller[key] = setTimeout(()=>
+			{
+				if(onKeyRemove) onKeyRemove(key, value);
+				target[key] = null;
+				delete target[key];
+				propKiller[key] = null;
+				delete propKiller[key];
+			}, ttl);
+		}
 		if(onKeySet) onKeySet(key, value);
 		return true;
 	}
